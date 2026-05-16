@@ -9,6 +9,7 @@
 
 # Try to find an aarch64 compiler
 clang = find_program('/usr/local/opt/llvm/bin/clang', '/opt/homebrew/opt/llvm/bin/clang', '/opt/local/bin/clang', 'clang', required: false)
+ld_lld = find_program('/usr/local/opt/lld/bin/ld.lld', '/opt/homebrew/opt/lld/bin/ld.lld', '/opt/local/bin/ld.lld', 'ld.lld', required: false)
 
 if clang.found()
     # Check if the compiler supports aarch64 target
@@ -21,7 +22,12 @@ if clang.found()
         endif
     endif
 
-    vdso_compiler = [clang, '-target', 'aarch64-linux-gnu', '-fuse-ld=lld']
+    vdso_compiler = [clang, '-target', 'aarch64-linux-gnu']
+    if host_machine.system() == 'darwin' and ld_lld.found()
+        vdso_compiler += '--ld-path=' + ld_lld.full_path()
+    else
+        vdso_compiler += '-fuse-ld=lld'
+    endif
 
     vdso = custom_target('vdso-arm64',
         input: ['vdso.S', 'vdso.c', 'vdso.lds'],

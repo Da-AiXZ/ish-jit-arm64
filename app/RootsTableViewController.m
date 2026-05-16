@@ -162,8 +162,25 @@
 }
 
 - (void)browseFiles {
-    NSURL *url = [NSFileProviderManager.defaultManager.documentStorageURL URLByAppendingPathComponent:self.rootName];
+    NSURL *documentStorageURL = NSFileProviderManager.defaultManager.documentStorageURL;
+    if (documentStorageURL == nil) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Files Unavailable"
+                                                                       message:@"The Files integration is not available in this build."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    NSURL *url = [documentStorageURL URLByAppendingPathComponent:self.rootName];
     NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if (components == nil) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Files Unavailable"
+                                                                       message:@"The Files location could not be opened."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
     components.scheme = @"shareddocuments";
     [UIApplication openURL:components.string];
 }
