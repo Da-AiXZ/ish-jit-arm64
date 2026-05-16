@@ -21,6 +21,3 @@ e2e_out/
 
 # Legacy bench scripts (replaced by benchmark/)
 bench/
-
-# Codex artifacts
-artifacts/

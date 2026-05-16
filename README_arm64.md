@@ -218,8 +218,13 @@ meson setup build-arm64-release -Dguest_arch=arm64 --buildtype=release
 ninja -C build-arm64-release
 
 # Run
-./build-arm64-release/ish -f ./alpine-arm64-fakefs /bin/sh
+./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /bin/sh
 ```
+
+For step-by-step build instructions that were validated on macOS and iOS in this fork, see:
+
+- [README.md](README.md#build-for-macos-standalone-arm64-linux-shell) for the standalone macOS host binary, fakefs creation, DNS notes, and launcher script
+- [README.md](README.md#build-for-ios) for Xcode device builds and ad-hoc `.ipa` packaging
 
 ---
 

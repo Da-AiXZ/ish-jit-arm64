@@ -210,7 +210,7 @@ meson setup build-arm64-release -Dguest_arch=arm64 --buildtype=release
 ninja -C build-arm64-release
 
 # 运行
-./build-arm64-release/ish -f ./alpine-arm64-fakefs /bin/sh
+./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /bin/sh
 ```
 
 ---

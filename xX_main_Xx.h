@@ -19,6 +19,28 @@
 
 void real_tty_reset_term(void);
 
+#ifdef __APPLE__
+static void configure_dns_from_host(void) {
+    FILE *host_resolv = fopen("/etc/resolv.conf", "r");
+    if (host_resolv == NULL)
+        return;
+
+    struct fd *fd = generic_open("/etc/resolv.conf", O_WRONLY_ | O_CREAT_ | O_TRUNC_, 0666);
+    if (IS_ERR(fd)) {
+        fclose(host_resolv);
+        return;
+    }
+
+    char buf[4096];
+    size_t nread;
+    while ((nread = fread(buf, 1, sizeof(buf), host_resolv)) > 0)
+        fd->ops->write(fd, buf, nread);
+
+    fclose(host_resolv);
+    fd_close(fd);
+}
+#endif
+
 static void exit_handler(struct task *task, int code) {
     if (task->parent != NULL)
         return;
@@ -93,6 +115,10 @@ static inline int xX_main_Xx(int argc, char *const argv[], const char *envp) {
 
     become_first_process();
     current->thread = pthread_self();
+
+#ifdef __APPLE__
+    configure_dns_from_host();
+#endif
 
     // Create essential device nodes (only works with fakefs)
     if (fs != &realfs) {

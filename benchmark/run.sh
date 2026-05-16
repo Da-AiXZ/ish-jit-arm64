@@ -28,8 +28,8 @@ DATE=$(date +%Y%m%d_%H%M%S)
 
 ISH_X86="$PROJECT_DIR/build-x86-release/ish"
 ISH_ARM64="$PROJECT_DIR/build-arm64-release/ish"
-FAKEFS_X86="$PROJECT_DIR/alpine-x86-fakefs"
-FAKEFS_ARM64="$PROJECT_DIR/alpine-arm64-fakefs"
+FAKEFS_X86="$PROJECT_DIR/build/alpine-x86-fakefs"
+FAKEFS_ARM64="$PROJECT_DIR/build/alpine-arm64-fakefs"
 
 PERF_MD="$SCRIPT_DIR/BENCHMARK_PERF.md"
 COMPAT_MD="$SCRIPT_DIR/BENCHMARK_COMPAT.md"
