@@ -1246,6 +1246,39 @@ _arm64_jit_helper_ldst_imm9_live:
     ldp x16, x17, [sp, #16]
     ldp x29, x30, [sp], #96
     ret
+90:
+    ldr x17, [sp, #80]
+    msr nzcv, x17
+    ldp x6, x7, [sp, #48]
+    ldp x4, x5, [sp, #32]
+    ldr x0, [sp, #64]
+    ldr x16, [x0, #24]             // spill_state_fn
+    cbz x16, 95f
+    blr x16
+95:
+    ldr x0, [sp, #64]
+    ldr w1, [sp, #76]              // guest_pc low 32
+    ldr w2, [sp, #72]              // insn low 32
+    bl _arm64_jit_c_ldst_imm9
+    cmp w0, #-1
+    b.ne 96f
+    ldr x0, [sp, #64]
+    ldr x16, [x0, #32]             // reload_state_fn
+    cbz x16, 96f
+    str x0, [sp, #88]
+    blr x16
+    ldr x0, [sp, #88]
+96:
+    cmp w0, #-1
+    b.ne 97f
+    ldr x17, [sp, #80]
+    msr nzcv, x17
+97:
+    ldp x6, x7, [sp, #48]
+    ldp x4, x5, [sp, #32]
+    ldp x16, x17, [sp, #16]
+    ldp x29, x30, [sp], #96
+    ret
 
 .globl _arm64_jit_helper_ldst_imm9_load_live
 _arm64_jit_helper_ldst_imm9_load_live:

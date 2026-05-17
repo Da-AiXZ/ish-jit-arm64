@@ -182,17 +182,20 @@ int arm64_jit_handle_verify_sigtrap(void *ctx) {
     if (arm64_jit_trace_mode() &&
             (site->guest_pc == 0xefeb36a0 || site->guest_pc == 0xefeb36a4 ||
              site->guest_pc == 0xefeb36a8 || site->guest_pc == 0xefeb36ac ||
-             site->guest_pc == 0xefeb36d4 || site->guest_pc == 0xefeb36d8)) {
+             (site->guest_pc >= 0xefeb36d0 && site->guest_pc <= 0xefeb3714))) {
         fprintf(stderr,
-                "[arm64-jit-verify] trap pc=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x5=0x%llx nzcv=0x%x expected_x3=0x%llx expected_x5=0x%llx expected_pc=0x%llx\n",
+                "[arm64-jit-verify] trap pc=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx nzcv=0x%x expected_x2=0x%llx expected_x3=0x%llx expected_x4=0x%llx expected_x5=0x%llx expected_pc=0x%llx\n",
                 (unsigned long long) site->guest_pc,
                 (unsigned long long) actual_cpu.regs[0],
                 (unsigned long long) actual_cpu.regs[1],
                 (unsigned long long) actual_cpu.regs[2],
                 (unsigned long long) actual_cpu.regs[3],
+                (unsigned long long) actual_cpu.regs[4],
                 (unsigned long long) actual_cpu.regs[5],
                 actual_cpu.nzcv,
+                (unsigned long long) vs->expected_cpu.regs[2],
                 (unsigned long long) vs->expected_cpu.regs[3],
+                (unsigned long long) vs->expected_cpu.regs[4],
                 (unsigned long long) vs->expected_cpu.regs[5],
                 (unsigned long long) vs->expected_cpu.pc);
     }
@@ -749,7 +752,7 @@ int arm64_jit_helper_cbz_cbnz(struct arm64_jit_runtime *rt, addr_t guest_pc, uin
         value = (uint32_t) value;
     bool take = is_nonzero ? (value != 0) : (value == 0);
     addr_t target = guest_pc + (take ? arm64_branch_imm19(insn) : 4);
-    if (guest_pc == 0xefeb36d8 || target < 0x1000) {
+    if ((guest_pc >= 0xefeb36d8 && guest_pc <= 0xefeb3728) || target < 0x1000) {
         fprintf(stderr,
                 "[arm64-jit] cbz/cbnz pc=0x%llx insn=0x%08x sf=%d nz=%d rt=%u value=0x%llx take=%d target=0x%llx\n",
                 (unsigned long long) guest_pc,
@@ -772,6 +775,16 @@ int arm64_jit_helper_b_cond(struct arm64_jit_runtime *rt, addr_t guest_pc, uint3
     arm64_set_nzcv(rt->cpu, rt->cpu->nzcv);
     bool take = arm64_cond_check(rt->cpu, cond);
     addr_t target = guest_pc + (take ? arm64_branch_imm19(insn) : 4);
+    if (guest_pc >= 0xefeb36d8 && guest_pc <= 0xefeb3728) {
+        fprintf(stderr,
+                "[arm64-jit] b.cond pc=0x%llx insn=0x%08x cond=%u take=%d target=0x%llx nzcv=0x%x\n",
+                (unsigned long long) guest_pc,
+                insn,
+                cond,
+                take,
+                (unsigned long long) target,
+                rt->cpu->nzcv);
+    }
     rt->resume_pc = target;
     rt->cpu->pc = target;
     rt->exit_interrupt = INT_NONE;
@@ -1752,6 +1765,25 @@ int arm64_jit_c_ldst_imm9(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_
     addr_t addr = is_post ? base : (base + imm9);
     int rc = -1;
 
+    if (arm64_jit_trace_mode() && guest_pc == 0xefeb36f8) {
+        fprintf(stderr,
+                "[arm64-jit] c_ldst_imm9 enter pc=0x%llx insn=0x%08x size=%u V=%u opc=%u imm9=%d mode=%u rn=%u rt=%u base=0x%llx addr=0x%llx x2=0x%llx x3=0x%llx sp=0x%llx\n",
+                (unsigned long long) guest_pc,
+                insn,
+                size,
+                V,
+                opc,
+                imm9,
+                mode,
+                rn,
+                rt_reg,
+                (unsigned long long) base,
+                (unsigned long long) addr,
+                (unsigned long long) rt->cpu->regs[2],
+                (unsigned long long) rt->cpu->regs[3],
+                (unsigned long long) rt->cpu->sp);
+    }
+
     if (is_load) {
         if (sign_extend && size < 2)
             return arm64_jit_helper_unsupported(rt, guest_pc);
@@ -1798,12 +1830,30 @@ int arm64_jit_c_ldst_imm9(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_
     }
 
     if (rc != 0) {
+        if (arm64_jit_trace_mode() && guest_pc == 0xefeb36f8) {
+            fprintf(stderr,
+                    "[arm64-jit] c_ldst_imm9 fault pc=0x%llx addr=0x%llx rc=%d segfault=0x%llx write=%d\n",
+                    (unsigned long long) guest_pc,
+                    (unsigned long long) addr,
+                    rc,
+                    (unsigned long long) rt->tlb->segfault_addr,
+                    !is_load);
+        }
         rt->cpu->segfault_addr = rt->tlb->segfault_addr;
         rt->cpu->segfault_was_write = !is_load;
         rt->cpu->pc = guest_pc;
         rt->resume_pc = guest_pc;
         rt->exit_interrupt = INT_GPF;
         return INT_GPF;
+    }
+
+    if (arm64_jit_trace_mode() && guest_pc == 0xefeb36f8) {
+        uint64_t writeback = is_post ? (base + imm9) : addr;
+        fprintf(stderr,
+                "[arm64-jit] c_ldst_imm9 ok pc=0x%llx addr=0x%llx writeback=0x%llx\n",
+                (unsigned long long) guest_pc,
+                (unsigned long long) addr,
+                (unsigned long long) writeback);
     }
 
     if (!is_unscaled) {
@@ -2342,7 +2392,7 @@ int arm64_jit_host_reg_for_guest(const struct arm64_jit_block *block, uint32_t g
     return block->gpr_map.host_reg[guest_reg];
 }
 
-static bool arm64_jit_try_enqueue_pc(addr_t *queue, uint32_t *count, addr_t pc,
+static bool arm64_jit_try_enqueue_pc_back(addr_t *queue, uint32_t *count, addr_t pc,
         addr_t start_pc, page_t base_page) {
     if (pc < start_pc)
         return false;
@@ -2360,26 +2410,48 @@ static bool arm64_jit_try_enqueue_pc(addr_t *queue, uint32_t *count, addr_t pc,
     return true;
 }
 
+static bool arm64_jit_try_enqueue_pc_front(addr_t *queue, uint32_t *count, uint32_t front,
+        addr_t pc, addr_t start_pc, page_t base_page) {
+    if (pc < start_pc)
+        return false;
+    if (PAGE(pc) != base_page)
+        return false;
+    if (((pc - start_pc) & 3) != 0)
+        return false;
+    for (uint32_t i = 0; i < *count; i++) {
+        if (queue[i] == pc)
+            return true;
+    }
+    if (*count >= ARM64_JIT_MAX_INSNS)
+        return false;
+    if (front > *count)
+        front = *count;
+    memmove(&queue[front + 1], &queue[front], (*count - front) * sizeof(queue[0]));
+    queue[front] = pc;
+    (*count)++;
+    return true;
+}
+
 static void arm64_jit_collect_local_branch_targets(uint32_t insn, addr_t guest_pc,
-        addr_t *queue, uint32_t *count, addr_t start_pc, page_t base_page) {
+        addr_t *queue, uint32_t *count, uint32_t front, addr_t start_pc, page_t base_page) {
     uint32_t op = (insn >> 26) & 0x3f;
     if (op == 0x05 || op == 0x25) {
-        arm64_jit_try_enqueue_pc(queue, count, guest_pc + arm64_branch_imm26(insn), start_pc, base_page);
+        arm64_jit_try_enqueue_pc_back(queue, count, guest_pc + arm64_branch_imm26(insn), start_pc, base_page);
         return;
     }
     if ((insn & 0xff000010u) == 0x54000000u) {
-        arm64_jit_try_enqueue_pc(queue, count, guest_pc + 4, start_pc, base_page);
-        arm64_jit_try_enqueue_pc(queue, count, guest_pc + arm64_branch_imm19(insn), start_pc, base_page);
+        arm64_jit_try_enqueue_pc_front(queue, count, front, guest_pc + 4, start_pc, base_page);
+        arm64_jit_try_enqueue_pc_back(queue, count, guest_pc + arm64_branch_imm19(insn), start_pc, base_page);
         return;
     }
     if ((insn & 0x7e000000u) == 0x34000000u) {
-        arm64_jit_try_enqueue_pc(queue, count, guest_pc + 4, start_pc, base_page);
-        arm64_jit_try_enqueue_pc(queue, count, guest_pc + arm64_branch_imm19(insn), start_pc, base_page);
+        arm64_jit_try_enqueue_pc_front(queue, count, front, guest_pc + 4, start_pc, base_page);
+        arm64_jit_try_enqueue_pc_back(queue, count, guest_pc + arm64_branch_imm19(insn), start_pc, base_page);
         return;
     }
     if ((insn & 0x7e000000u) == 0x36000000u) {
-        arm64_jit_try_enqueue_pc(queue, count, guest_pc + 4, start_pc, base_page);
-        arm64_jit_try_enqueue_pc(queue, count, guest_pc + arm64_branch_imm14(insn), start_pc, base_page);
+        arm64_jit_try_enqueue_pc_front(queue, count, front, guest_pc + 4, start_pc, base_page);
+        arm64_jit_try_enqueue_pc_back(queue, count, guest_pc + arm64_branch_imm14(insn), start_pc, base_page);
         return;
     }
     if ((insn & 0xfe000000u) == 0xd6000000u) {
@@ -2463,13 +2535,14 @@ static struct arm64_jit_block *arm64_jit_compile_block(addr_t start_pc, struct t
         }
 
         enum arm64_insn_type type = info->type;
-        if (type == INSN_BRANCH && !arm64_jit_verify_mode() &&
-                block->insn_count + 8 < ARM64_JIT_MAX_INSNS) {
-            arm64_jit_collect_local_branch_targets(insn, insn_pc, queue, &queue_count, start_pc, base_page);
+        if (type == INSN_BRANCH && block->insn_count + 8 < ARM64_JIT_MAX_INSNS) {
+            arm64_jit_collect_local_branch_targets(insn, insn_pc, queue, &queue_count,
+                    block->insn_count, start_pc, base_page);
         }
         if (type != INSN_BRANCH) {
             if (PAGE(insn_pc) == PAGE(next_pc))
-                arm64_jit_try_enqueue_pc(queue, &queue_count, next_pc, start_pc, base_page);
+                arm64_jit_try_enqueue_pc_front(queue, &queue_count, block->insn_count,
+                        next_pc, start_pc, base_page);
         }
     }
 

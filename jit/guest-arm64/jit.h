@@ -77,6 +77,7 @@ struct arm64_jit_pc_map {
 
 struct arm64_jit_local_fixup {
     uint32_t branch_offset;
+    addr_t branch_pc;
     addr_t target_pc;
     uint32_t kind;
 };
@@ -119,6 +120,8 @@ struct arm64_jit_block {
     struct arm64_jit_verify_site verify_sites[ARM64_JIT_MAX_VERIFY_SITES];
     uint32_t fixup_count;
     struct arm64_jit_local_fixup fixups[ARM64_JIT_MAX_FIXUPS];
+    uint32_t disabled_local_fixup_count;
+    addr_t disabled_local_fixup_pcs[ARM64_JIT_MAX_FIXUPS];
 };
 
 struct arm64_jit_state {
@@ -302,7 +305,7 @@ void arm64_jit_emit_load_cached_state(struct arm64_jit_emitter *e);
 void arm64_jit_emit_spill_cached_state(struct arm64_jit_emitter *e);
 void arm64_jit_emit_helper_return(struct arm64_jit_emitter *e, void *helper, addr_t guest_pc);
 bool arm64_jit_block_has_pc(const struct arm64_jit_block *block, addr_t guest_pc);
-void arm64_jit_emit_local_fixup(struct arm64_jit_emitter *e, addr_t target_pc, uint32_t kind);
+void arm64_jit_emit_local_fixup(struct arm64_jit_emitter *e, addr_t branch_pc, addr_t target_pc, uint32_t kind);
 bool arm64_jit_patch_local_fixups(struct arm64_jit_block *block, uint8_t *buf);
 
 enum arm64_jit_emit_result arm64_jit_emit_dp_imm(struct arm64_jit_emitter *e, uint32_t insn, addr_t guest_pc);
