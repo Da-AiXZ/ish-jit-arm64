@@ -663,7 +663,11 @@ static bool arm64_jit_emit_simd_fp_cached(struct arm64_jit_emitter *e, uint32_t 
     if ((insn & 0xff80fc00u) == 0x0f000400u || // MOVI .4H / .2S
             (insn & 0xff80fc00u) == 0x4f000400u || // MOVI .8H / .4S
             (insn & 0xff80fc00u) == 0x0f00e400u || // MOVI .8B
-            (insn & 0xff80fc00u) == 0x4f00e400u) { // MOVI .16B
+            (insn & 0xff80fc00u) == 0x4f00e400u || // MOVI .16B
+            (insn & 0xff80fc00u) == 0x2f000400u || // MVNI .4H / .2S
+            (insn & 0xff80fc00u) == 0x6f000400u || // MVNI .8H / .4S
+            (insn & 0xff80fc00u) == 0x2f00e400u || // MVNI .8B
+            (insn & 0xff80fc00u) == 0x6f00e400u) { // MVNI .16B
         arm64_jit_emit32(e, insn);
         return true;
     }
@@ -887,11 +891,14 @@ static bool arm64_jit_emit_adr_cached(struct arm64_jit_emitter *e, uint32_t insn
 }
 
 static bool arm64_jit_emit_bitfield_cached(struct arm64_jit_emitter *e, uint32_t insn) {
-    if ((insn & 0x1f800000u) != 0x13000000u)
+    bool is_bitfield = (insn & 0x1f800000u) == 0x13000000u;
+    bool is_extr = (insn & 0x7f800000u) == 0x13800000u;
+    if (!is_bitfield && !is_extr)
         return false;
 
     uint32_t rd = ARM64_RD(insn);
     uint32_t rn = ARM64_RN(insn);
+    uint32_t rm = ARM64_RM(insn);
     int dst = arm64_jit_guest_src_host_reg(e->block, rd, false);
     int src = arm64_jit_guest_src_host_reg(e->block, rn, false);
     if (dst < 0 || src < 0)
@@ -902,6 +909,13 @@ static bool arm64_jit_emit_bitfield_cached(struct arm64_jit_emitter *e, uint32_t
     emitted &= ~((uint32_t) 0x1f << 5);
     emitted |= (uint32_t) dst;
     emitted |= (uint32_t) src << 5;
+    if (is_extr) { // EXTR
+        int src2 = arm64_jit_guest_src_host_reg(e->block, rm, false);
+        if (src2 < 0)
+            return false;
+        emitted &= ~((uint32_t) 0x1f << 16);
+        emitted |= (uint32_t) src2 << 16;
+    }
     arm64_jit_emit32(e, emitted);
     return true;
 }
@@ -1189,6 +1203,13 @@ static bool arm64_jit_emit_dp_3src_cached(struct arm64_jit_emitter *e, uint32_t 
 }
 
 static bool arm64_jit_emit_system_cached(struct arm64_jit_emitter *e, uint32_t insn) {
+    if ((insn & 0xfffff09fu) == 0xd503309fu || // DMB <option>
+            (insn & 0xfffff09fu) == 0xd503309fu + 0x2000u || // DSB <option>
+            insn == 0xd5033fdfu || // ISB
+            (insn & 0xfffffc1fu) == 0xd503305fu) { // CLREX <imm>
+        arm64_jit_emit32(e, insn);
+        return true;
+    }
     if ((insn & 0xffffffe0U) == 0xd53bd040U) { // mrs xt, tpidr_el0
         uint32_t rd = ARM64_RD(insn);
         int dst = arm64_jit_host_reg_for_guest(e->block, rd);
