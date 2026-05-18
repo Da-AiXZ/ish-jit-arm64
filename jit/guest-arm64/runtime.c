@@ -1693,8 +1693,6 @@ int arm64_jit_c_ldst_imm9(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_
 
 
     if (is_load) {
-        if (sign_extend && size < 2)
-            return arm64_jit_helper_unsupported(rt, guest_pc);
         if (size == 3) {
             uint64_t value = 0;
             rc = c_load64(rt->tlb, addr, &value);
@@ -1717,13 +1715,29 @@ int arm64_jit_c_ldst_imm9(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_
         } else if (size == 1) {
             uint16_t value = 0;
             rc = c_load16(rt->tlb, addr, &value);
-            if (rc == 0)
-                arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
+            if (rc == 0) {
+                if (sign_extend) {
+                    if (extend_to_64)
+                        arm64_jit_write_gpr(rt->cpu, rt_reg, (uint64_t) (int64_t) (int16_t) value, true);
+                    else
+                        arm64_jit_write_gpr(rt->cpu, rt_reg, (uint32_t) (int32_t) (int16_t) value, false);
+                } else {
+                    arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
+                }
+            }
         } else {
             uint8_t value = 0;
             rc = c_load8(rt->tlb, addr, &value);
-            if (rc == 0)
-                arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
+            if (rc == 0) {
+                if (sign_extend) {
+                    if (extend_to_64)
+                        arm64_jit_write_gpr(rt->cpu, rt_reg, (uint64_t) (int64_t) (int8_t) value, true);
+                    else
+                        arm64_jit_write_gpr(rt->cpu, rt_reg, (uint32_t) (int32_t) (int8_t) value, false);
+                } else {
+                    arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
+                }
+            }
         }
     } else {
         uint64_t value = arm64_jit_read_gpr(rt->cpu, rt_reg, false);
@@ -1776,9 +1790,6 @@ int arm64_jit_c_ldst_regoff(struct arm64_jit_runtime *rt, addr_t guest_pc, uint3
     bool is_load = (opc == 1) || (opc == 2) || (opc == 3);
     bool sign_extend = (opc >= 2);
     bool extend_to_64 = (opc == 2);
-    if (is_load && sign_extend && size < 2)
-        return arm64_jit_helper_unsupported(rt, guest_pc);
-
     uint64_t base = arm64_jit_read_gpr(rt->cpu, rn, true);
     uint64_t offset_raw = arm64_jit_read_gpr(rt->cpu, rm, false);
     uint64_t offset = 0;
@@ -1832,13 +1843,29 @@ int arm64_jit_c_ldst_regoff(struct arm64_jit_runtime *rt, addr_t guest_pc, uint3
         } else if (size == 1) {
             uint16_t value = 0;
             rc = c_load16(rt->tlb, addr, &value);
-            if (rc == 0)
-                arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
+            if (rc == 0) {
+                if (sign_extend) {
+                    if (extend_to_64)
+                        arm64_jit_write_gpr(rt->cpu, rt_reg, (uint64_t) (int64_t) (int16_t) value, true);
+                    else
+                        arm64_jit_write_gpr(rt->cpu, rt_reg, (uint32_t) (int32_t) (int16_t) value, false);
+                } else {
+                    arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
+                }
+            }
         } else {
             uint8_t value = 0;
             rc = c_load8(rt->tlb, addr, &value);
-            if (rc == 0)
-                arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
+            if (rc == 0) {
+                if (sign_extend) {
+                    if (extend_to_64)
+                        arm64_jit_write_gpr(rt->cpu, rt_reg, (uint64_t) (int64_t) (int8_t) value, true);
+                    else
+                        arm64_jit_write_gpr(rt->cpu, rt_reg, (uint32_t) (int32_t) (int8_t) value, false);
+                } else {
+                    arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
+                }
+            }
         }
     } else {
         uint64_t value = arm64_jit_read_gpr(rt->cpu, rt_reg, false);
@@ -2797,6 +2824,18 @@ static int arm64_jit_run_block(struct arm64_jit_block *block, struct cpu_state *
 
     if (interrupt != INT_JIT_CRASH)
         interrupt = rt.exit_interrupt;
+
+    if (arm64_jit_trace_mode() && !arm64_jit_verify_mode()) {
+        fprintf(stderr,
+                "[arm64-jit] block-run start=0x%llx end=0x%llx interrupt=%d resume_pc=0x%llx cpu_pc=0x%llx x0=0x%llx x30=0x%llx\n",
+                (unsigned long long) block->start_pc,
+                (unsigned long long) block->end_pc,
+                interrupt,
+                (unsigned long long) rt.resume_pc,
+                (unsigned long long) cpu->pc,
+                (unsigned long long) cpu->regs[0],
+                (unsigned long long) cpu->regs[30]);
+    }
 
     if (!arm64_jit_verify_mode() && rt.resume_pc < 0x1000) {
         fprintf(stderr,

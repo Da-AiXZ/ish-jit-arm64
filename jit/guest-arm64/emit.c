@@ -394,9 +394,9 @@ static void arm64_jit_emit_helper_continue_live_load_pair(struct arm64_jit_emitt
     arm64_jit_emit32(e, arm64_jit_enc_blr(16));
     arm64_jit_emit_helper_continue_check(e);
     arm64_jit_emit_epilogue(e);
-    if (dst0_host != 1)
+    if ((int) dst0_host >= 0 && dst0_host != 1)
         arm64_jit_emit32(e, arm64_jit_enc_mov_reg(dst0_host, 1));
-    if (dst1_host != 2)
+    if ((int) dst1_host >= 0 && dst1_host != 2)
         arm64_jit_emit32(e, arm64_jit_enc_mov_reg(dst1_host, 2));
 }
 
@@ -590,23 +590,23 @@ static bool arm64_jit_emit_simd_fp_cached(struct arm64_jit_emitter *e, uint32_t 
 
     switch (simd_rrr) {
         case 0x1e220800u: // FMUL Dd, Dn, Dm
-        case 0x1e620800u: // FMUL Dd, Dn, Dm
+        case 0x1e600800u: // FMUL Dd, Dn, Dm
         case 0x1e221800u: // FDIV Sd, Sn, Sm
-        case 0x1e621800u: // FDIV Dd, Dn, Dm
+        case 0x1e601800u: // FDIV Dd, Dn, Dm
         case 0x1e222800u: // FADD Sd, Sn, Sm
-        case 0x1e622800u: // FADD Dd, Dn, Dm
+        case 0x1e602800u: // FADD Dd, Dn, Dm
         case 0x1e223800u: // FSUB Sd, Sn, Sm
-        case 0x1e623800u: // FSUB Dd, Dn, Dm
+        case 0x1e603800u: // FSUB Dd, Dn, Dm
         case 0x1e224800u: // FMAX Sd, Sn, Sm
-        case 0x1e624800u: // FMAX Dd, Dn, Dm
+        case 0x1e604800u: // FMAX Dd, Dn, Dm
         case 0x1e225800u: // FMIN Sd, Sn, Sm
-        case 0x1e625800u: // FMIN Dd, Dn, Dm
+        case 0x1e605800u: // FMIN Dd, Dn, Dm
         case 0x1e226800u: // FMAXNM Sd, Sn, Sm
-        case 0x1e626800u: // FMAXNM Dd, Dn, Dm
+        case 0x1e606800u: // FMAXNM Dd, Dn, Dm
         case 0x1e227800u: // FMINNM Sd, Sn, Sm
-        case 0x1e627800u: // FMINNM Dd, Dn, Dm
+        case 0x1e607800u: // FMINNM Dd, Dn, Dm
         case 0x1e220c00u: // FCSEL Sd, Sn, Sm, cond
-        case 0x1e620c00u: // FCSEL Dd, Dn, Dm, cond
+        case 0x1e600c00u: // FCSEL Dd, Dn, Dm, cond
             arm64_jit_emit32(e, insn);
             return true;
         default:
@@ -617,6 +617,14 @@ static bool arm64_jit_emit_simd_fp_cached(struct arm64_jit_emitter *e, uint32_t 
         return true;
     }
     if ((insn & 0xfffffc00u) == 0x1e604000u) { // FMOV Dd, Dn
+        arm64_jit_emit32(e, insn);
+        return true;
+    }
+    if ((insn & ~((uint32_t) 0x1f)) == 0x1e2c1000u) { // FMOV Sd, #imm
+        arm64_jit_emit32(e, insn);
+        return true;
+    }
+    if ((insn & ~((uint32_t) 0x1f)) == 0x1e6c1000u) { // FMOV Dd, #imm
         arm64_jit_emit32(e, insn);
         return true;
     }
@@ -643,6 +651,20 @@ static bool arm64_jit_emit_simd_fp_cached(struct arm64_jit_emitter *e, uint32_t 
     if ((insn & 0xfffffc00u) == 0x1e61c000u) { // FSQRT Dd, Dn
         arm64_jit_emit32(e, insn);
         return true;
+    }
+    switch (insn & ~(((uint32_t) 0x1f) | ((uint32_t) 0x1f << 5))) {
+        case 0x1e220000u: // SCVTF Sd, Wn
+        case 0x1e620000u: // SCVTF Dd, Wn
+        case 0x9e220000u: // SCVTF Sd, Xn
+        case 0x9e620000u: // SCVTF Dd, Xn
+        case 0x1e230000u: // UCVTF Sd, Wn
+        case 0x1e630000u: // UCVTF Dd, Wn
+        case 0x9e230000u: // UCVTF Sd, Xn
+        case 0x9e630000u: // UCVTF Dd, Xn
+            arm64_jit_emit32(e, insn);
+            return true;
+        default:
+            break;
     }
     if ((insn & 0xfffffc1fu) == 0x1e212000u) { // FCMP Sn, Sm
         arm64_jit_emit32(e, insn);
@@ -1203,6 +1225,19 @@ static bool arm64_jit_emit_dp_3src_cached(struct arm64_jit_emitter *e, uint32_t 
 }
 
 static bool arm64_jit_emit_system_cached(struct arm64_jit_emitter *e, uint32_t insn) {
+    switch (insn) {
+        case 0xd503201fU: // NOP
+        case 0xd503203fU: // YIELD
+        case 0xd503205fU: // WFE
+        case 0xd503207fU: // WFI
+        case 0xd503209fU: // SEV
+        case 0xd50320bfU: // SEVL
+            // Treat architectural hints as guest-local no-ops for now.
+            arm64_jit_emit32(e, 0xd503201fU);
+            return true;
+        default:
+            break;
+    }
     if ((insn & 0xfffff09fu) == 0xd503309fu || // DMB <option>
             (insn & 0xfffff09fu) == 0xd503309fu + 0x2000u || // DSB <option>
             insn == 0xd5033fdfu || // ISB

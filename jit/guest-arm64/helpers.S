@@ -1574,7 +1574,6 @@ _arm64_jit_helper_ldst_regoff:
     str x6, [x17, x5, lsl #3]
 
 20:
-    lsr x1, x1, #32
     add x1, x1, #4
     ldr x17, [sp, #32]
     str x1, [x17, #40]             // rt->resume_pc
