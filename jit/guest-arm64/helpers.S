@@ -3108,7 +3108,7 @@ _arm64_jit_helper_ldst_regoff_load_live:
 _arm64_jit_helper_ldst_pair:
     // x0 = rt*, x1 = guest_pc, x2 = insn
     // Fast path for pair load/store:
-    //   scalar: V == 0 and opc == 0/2
+    //   scalar: V == 0 and opc == 0/1(load-only LDPSW)/2
     //   vector: V == 1 and opc == 0/1/2
     //   mode == 1/2/3 (post/offset/pre)
     //   same-page only
@@ -3127,6 +3127,12 @@ _arm64_jit_helper_ldst_pair:
     ubfx x16, x2, #30, #2          // scalar opc
     cmp x16, #0
     b.eq 1f
+    cmp x16, #1
+    b.ne 0f
+    ubfx x17, x2, #22, #1          // LDPSW is load-only
+    cbnz x17, 1f
+    b 9f
+0:
     cmp x16, #2
     b.eq 1f
     b 9f
@@ -3263,10 +3269,16 @@ _arm64_jit_helper_ldst_pair:
     ubfx x6, x2, #0, #5            // rt
     ubfx x8, x2, #10, #5           // rt2
     ubfx x16, x2, #30, #2          // opc
+    cmp x16, #1
+    b.eq 16f
     cmp x16, #2
     b.eq 14f
     ldr w9, [x7]
     ldr w10, [x7, #4]
+    b 17f
+16:
+    ldrsw x9, [x7]
+    ldrsw x10, [x7, #4]
     b 17f
 14:
     ldr x9, [x7]
@@ -3402,7 +3414,7 @@ _arm64_jit_helper_ldst_pair:
 .globl _arm64_jit_helper_ldst_pair_load_live
 _arm64_jit_helper_ldst_pair_load_live:
     // x0 = rt*, x1 = packed(guest_pc<<32 | insn), x2 = guest_addr, x3 = return_in_x1_x2
-    // Clean live-cache path only for scalar offset pair loads (V==0, L==1, mode==2, opc==0/2).
+    // Clean live-cache path only for scalar offset pair loads (V==0, L==1, mode==2, opc==0/1/2).
     stp x29, x30, [sp, #-176]!
     stp x16, x17, [sp, #16]
     stp x0, x1, [sp, #32]
@@ -3426,6 +3438,8 @@ _arm64_jit_helper_ldst_pair_load_live:
     b.ne 90f
     ubfx x17, x16, #30, #2         // opc
     cmp x17, #0
+    b.eq 1f
+    cmp x17, #1
     b.eq 1f
     cmp x17, #2
     b.ne 90f
@@ -3455,10 +3469,16 @@ _arm64_jit_helper_ldst_pair_load_live:
 
     ldr w16, [sp, #40]
     ubfx x16, x16, #30, #2         // opc
+    cmp x16, #1
+    b.eq 9f
     cmp x16, #2
     b.eq 10f
     ldr w0, [x17]
     ldr w2, [x17, #4]
+    b 11f
+9:
+    ldrsw x0, [x17]
+    ldrsw x2, [x17, #4]
     b 11f
 10:
     ldr x0, [x17]

@@ -1742,26 +1742,36 @@ int arm64_jit_c_ldr_imm_unsigned(struct arm64_jit_runtime *rt, uint64_t packed0,
         rc = c_load32_sx(rt->tlb, addr, &value);
         if (rc == 0)
             arm64_jit_write_gpr(rt->cpu, rt_reg, (uint64_t) value, true);
-    } else if (load_mode == 3 && size_shift == 1) { // LDRSH X
+    } else if (load_mode == 2 && size_shift == 1) { // LDRSH X
         uint16_t value = 0;
         rc = c_load16(rt->tlb, addr, &value);
         if (rc == 0)
             arm64_jit_write_gpr(rt->cpu, rt_reg, (int16_t) value, true);
-    } else if (load_mode == 3 && size_shift == 0) { // LDRSB X
+    } else if (load_mode == 2 && size_shift == 0) { // LDRSB X
         uint8_t value = 0;
         rc = c_load8(rt->tlb, addr, &value);
         if (rc == 0)
             arm64_jit_write_gpr(rt->cpu, rt_reg, (int8_t) value, true);
-    } else if (load_mode == 1 && size_shift == 1) { // LDRH / LDRSH W
+    } else if (load_mode == 1 && size_shift == 1) { // LDRH
         uint16_t value = 0;
         rc = c_load16(rt->tlb, addr, &value);
         if (rc == 0)
             arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
-    } else if (load_mode == 1 && size_shift == 0) { // LDRB / LDRSB W
+    } else if (load_mode == 1 && size_shift == 0) { // LDRB
         uint8_t value = 0;
         rc = c_load8(rt->tlb, addr, &value);
         if (rc == 0)
             arm64_jit_write_gpr(rt->cpu, rt_reg, value, false);
+    } else if (load_mode == 3 && size_shift == 1) { // LDRSH W
+        uint16_t value = 0;
+        rc = c_load16(rt->tlb, addr, &value);
+        if (rc == 0)
+            arm64_jit_write_gpr(rt->cpu, rt_reg, (uint32_t) (int32_t) (int16_t) value, false);
+    } else if (load_mode == 3 && size_shift == 0) { // LDRSB W
+        uint8_t value = 0;
+        rc = c_load8(rt->tlb, addr, &value);
+        if (rc == 0)
+            arm64_jit_write_gpr(rt->cpu, rt_reg, (uint32_t) (int32_t) (int8_t) value, false);
     } else if (size_shift == 3) {
         uint64_t value = 0;
         rc = c_load64(rt->tlb, addr, &value);
@@ -2675,7 +2685,8 @@ int arm64_jit_c_ldst_pair(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_
     }
 
     bool is64 = (opc == 2);
-    if (!(opc == 0 || opc == 2))
+    bool is_ldpsw = (L && opc == 1);
+    if (!(opc == 0 || opc == 2 || is_ldpsw))
         return arm64_jit_helper_unsupported(rt, guest_pc);
 
     bool is_pre = (mode == 3);
@@ -2706,8 +2717,10 @@ int arm64_jit_c_ldst_pair(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_
             if (rc == 0)
                 rc = c_load32(rt->tlb, addr + 4, &b);
             if (rc == 0) {
-                arm64_jit_write_gpr(rt->cpu, rt_reg, a, false);
-                arm64_jit_write_gpr(rt->cpu, rt2_reg, b, false);
+                arm64_jit_write_gpr(rt->cpu, rt_reg, is_ldpsw ? (uint64_t) (int64_t) (int32_t) a : a,
+                        is_ldpsw);
+                arm64_jit_write_gpr(rt->cpu, rt2_reg, is_ldpsw ? (uint64_t) (int64_t) (int32_t) b : b,
+                        is_ldpsw);
             }
         }
     } else {
