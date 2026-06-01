@@ -243,6 +243,40 @@ timeout 20s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_HANDOFF_AFTER_BLOCKS=2
 `ISH_ARM64_JIT_UNTIL_PC=0x...` hands off when dispatch reaches a specific guest
 PC. `ISH_ARM64_JIT_PROGRESS_INTERVAL=N` logs every `N` dispatched JIT blocks.
 
+## Runtime Bottleneck Profiling
+
+Use syscall-segment profiling to compare guest execution time between syscall
+boundaries. This is useful when a complete workload is slower under JIT but the
+syscall count and stdout are correct.
+
+### Default backend syscall segments
+
+```bash
+timeout 30s env ISH_SYSCALL_SEGMENT_PROFILE=1 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk stats \
+  > /private/tmp/apk_stats_default_seg.stdout \
+  2> /private/tmp/apk_stats_default_seg.stderr
+```
+
+### JIT syscall segments with helper-family deltas
+
+```bash
+timeout 30s env ISH_SYSCALL_SEGMENT_PROFILE=1 ISH_ARM64_BACKEND=arm64_jit \
+  ISH_ARM64_JIT_HELPER_PROFILE=1 ISH_ARM64_JIT_HELPER_PROFILE_INTERVAL=0 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk stats \
+  > /private/tmp/apk_stats_jit_seg.stdout \
+  2> /private/tmp/apk_stats_jit_seg.stderr
+```
+
+Each `[syscall-segment]` line reports:
+
+- `guest_ns`: guest execution time since the previous syscall returned
+- `syscall_ns`: host time spent handling the syscall itself
+- `jit_*`: JIT block/control/C-helper deltas for that syscall-bounded segment
+
+The helper-family deltas only become nonzero when
+`ISH_ARM64_JIT_HELPER_PROFILE=1` is enabled.
+
 ## Branch-Link Notes
 
 Plain JIT and verifier mode should use the same instruction implementations;
@@ -356,6 +390,17 @@ The ABI is documented in:
 - [/Users/zizhengguo/scratch/ish-arm64/jit/guest-arm64/helpers.S](/Users/zizhengguo/scratch/ish-arm64/jit/guest-arm64/helpers.S)
 
 When changing this architecture, update both that file and this one.
+
+Current indexed scalar-pair rule:
+
+- Offset, pre-index, and post-index scalar pair load/store may use the emitted
+  TLB-hit fast path.
+- Base-overlap writeback forms stay on the existing C helper path until their
+  constrained-unpredictable behavior is deliberately modeled.
+- If the emitted fast path falls back to the C helper for a writeback form, it
+  must reload the cached base/SP register from `cpu` after helper success.
+  Otherwise the helper updates canonical CPU state but the fragment continues
+  with a stale cached base register.
 
 ## Current Fragment Lookup Direction
 

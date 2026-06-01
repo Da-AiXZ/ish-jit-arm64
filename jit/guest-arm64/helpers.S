@@ -3414,7 +3414,7 @@ _arm64_jit_helper_ldst_pair:
 .globl _arm64_jit_helper_ldst_pair_load_live
 _arm64_jit_helper_ldst_pair_load_live:
     // x0 = rt*, x1 = packed(guest_pc<<32 | insn), x2 = guest_addr, x3 = return_in_x1_x2
-    // Clean live-cache path only for scalar offset pair loads (V==0, L==1, mode==2, opc==0/1/2).
+    // Clean live-cache path for scalar offset pair loads (V==0, L==1, mode=offset, opc==0/1/2).
     stp x29, x30, [sp, #-176]!
     stp x16, x17, [sp, #16]
     stp x0, x1, [sp, #32]
@@ -3589,7 +3589,7 @@ _arm64_jit_helper_ldst_pair_load_live:
 .globl _arm64_jit_helper_ldst_pair_store_live
 _arm64_jit_helper_ldst_pair_store_live:
     // x0 = rt*, x1 = packed(guest_pc<<32 | insn), x2 = guest_addr, x3 = val0, x16 = val1
-    // Clean live-cache path only for scalar offset pair stores (V==0, L==0, mode==2, opc==0/2).
+    // Clean live-cache path for scalar offset pair stores (V==0, L==0, mode=offset, opc==0/2).
     stp x29, x30, [sp, #-176]!
     stp x16, x17, [sp, #16]
     stp x0, x1, [sp, #32]
@@ -3733,8 +3733,11 @@ _arm64_jit_helper_ldst_pair_vec_live:
     ubfx x17, x16, #30, #2         // opc
     cmp x17, #2
     b.hi 90f
-    cmp x17, #2
-    b.eq 90f                       // keep Q pair forms on the C path for now
+    b.ne 1f
+    ubfx x17, x16, #22, #1         // Q pair loads still need full reload semantics.
+    cbnz x17, 90f
+    mov x17, #2
+1:
 
     mov x3, #4
     lsl x3, x3, x17                // elem size = 4/8/16

@@ -57,6 +57,18 @@ static _Atomic uint64_t g_arm64_jit_debug_blocks;
 struct arm64_jit_helper_profile {
     _Atomic uint64_t dispatch_blocks;
     _Atomic uint64_t c_helper_total;
+    _Atomic uint64_t c_dp_imm;
+    _Atomic uint64_t c_dp_reg;
+    _Atomic uint64_t c_ldr_uimm;
+    _Atomic uint64_t c_str_uimm;
+    _Atomic uint64_t c_simd_ldst_uimm;
+    _Atomic uint64_t c_simd_ldst_addr;
+    _Atomic uint64_t c_simd_ldst_multi;
+    _Atomic uint64_t c_ldst_imm9;
+    _Atomic uint64_t c_ldst_regoff;
+    _Atomic uint64_t c_ldst_pair;
+    _Atomic uint64_t c_ldst_excl;
+    _Atomic uint64_t c_system;
     _Atomic uint64_t control_total;
     _Atomic uint64_t control_dispatch;
     _Atomic uint64_t control_branch_reg;
@@ -462,6 +474,64 @@ static void arm64_jit_profile_inc(_Atomic uint64_t *counter) {
         atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
 }
 
+static void arm64_jit_profile_inc_c_helper(_Atomic uint64_t *family_counter) {
+    if (!arm64_jit_helper_profile_mode())
+        return;
+    atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.c_helper_total, 1,
+            memory_order_relaxed);
+    atomic_fetch_add_explicit(family_counter, 1, memory_order_relaxed);
+}
+
+void arm64_jit_get_helper_profile_snapshot(struct arm64_jit_helper_profile_snapshot *out) {
+    if (out == NULL)
+        return;
+    out->dispatch_blocks = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.dispatch_blocks, memory_order_relaxed);
+    out->c_helper_total = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_helper_total, memory_order_relaxed);
+    out->c_dp_imm = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_dp_imm, memory_order_relaxed);
+    out->c_dp_reg = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_dp_reg, memory_order_relaxed);
+    out->c_ldr_uimm = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_ldr_uimm, memory_order_relaxed);
+    out->c_str_uimm = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_str_uimm, memory_order_relaxed);
+    out->c_simd_ldst_uimm = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_simd_ldst_uimm, memory_order_relaxed);
+    out->c_simd_ldst_addr = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_simd_ldst_addr, memory_order_relaxed);
+    out->c_simd_ldst_multi = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_simd_ldst_multi, memory_order_relaxed);
+    out->c_ldst_imm9 = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_ldst_imm9, memory_order_relaxed);
+    out->c_ldst_regoff = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_ldst_regoff, memory_order_relaxed);
+    out->c_ldst_pair = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_ldst_pair, memory_order_relaxed);
+    out->c_ldst_excl = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_ldst_excl, memory_order_relaxed);
+    out->c_system = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.c_system, memory_order_relaxed);
+    out->control_total = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.control_total, memory_order_relaxed);
+    out->control_dispatch = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.control_dispatch, memory_order_relaxed);
+    out->control_branch_reg = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.control_branch_reg, memory_order_relaxed);
+    out->control_cbz_cbnz = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.control_cbz_cbnz, memory_order_relaxed);
+    out->control_b_cond = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.control_b_cond, memory_order_relaxed);
+    out->control_tbz_tbnz = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.control_tbz_tbnz, memory_order_relaxed);
+    out->syscall = atomic_load_explicit(&g_arm64_jit_helper_profile.syscall, memory_order_relaxed);
+    out->unsupported = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.unsupported, memory_order_relaxed);
+    out->misc_helper = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.misc_helper, memory_order_relaxed);
+}
+
 static uint64_t arm64_jit_helper_profile_interval(void) {
     static bool inited;
     static uint64_t interval;
@@ -514,6 +584,34 @@ static void arm64_jit_dump_helper_profile(void) {
                     &g_arm64_jit_helper_profile.control_b_cond, memory_order_relaxed),
             (unsigned long long) atomic_load_explicit(
                     &g_arm64_jit_helper_profile.control_tbz_tbnz, memory_order_relaxed));
+    fprintf(stderr,
+            "[arm64-jit-helper-profile] c_helper dp_imm=%llu dp_reg=%llu "
+            "ldr_uimm=%llu str_uimm=%llu simd_uimm=%llu simd_addr=%llu "
+            "simd_multi=%llu imm9=%llu regoff=%llu pair=%llu excl=%llu system=%llu\n",
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_dp_imm, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_dp_reg, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_ldr_uimm, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_str_uimm, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_simd_ldst_uimm, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_simd_ldst_addr, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_simd_ldst_multi, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_ldst_imm9, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_ldst_regoff, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_ldst_pair, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_ldst_excl, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.c_system, memory_order_relaxed));
     fprintf(stderr,
             "[arm64-jit-helper-profile] exits syscall=%llu unsupported=%llu misc_helper=%llu\n",
             (unsigned long long) atomic_load_explicit(
@@ -808,7 +906,7 @@ int arm64_jit_helper_branch_reg(struct arm64_jit_runtime *rt, addr_t guest_pc, u
 }
 
 int arm64_jit_helper_mrs_tpidr(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t rd) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.misc_helper);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_system);
     if (rd < 31)
         rt->cpu->regs[rd] = rt->cpu->tls_ptr;
     rt->resume_pc = guest_pc + 4;
@@ -818,7 +916,7 @@ int arm64_jit_helper_mrs_tpidr(struct arm64_jit_runtime *rt, addr_t guest_pc, ui
 }
 
 int arm64_jit_helper_mrs_sysreg(struct arm64_jit_runtime *rt, uint64_t packed) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.misc_helper);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_system);
     addr_t guest_pc = (addr_t) (packed & 0xffffffffu);
     uint32_t rd = (packed >> 32) & 0x1f;
     uint32_t sysreg_id = (packed >> 40) & 0xff;
@@ -888,7 +986,7 @@ int arm64_jit_helper_mrs_sysreg(struct arm64_jit_runtime *rt, uint64_t packed) {
 }
 
 int arm64_jit_helper_msr_tpidr(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t rn) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.misc_helper);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_system);
     uint64_t value = (rn == 31) ? 0 : rt->cpu->regs[rn];
     rt->cpu->tls_ptr = value;
     rt->resume_pc = guest_pc + 4;
@@ -898,7 +996,7 @@ int arm64_jit_helper_msr_tpidr(struct arm64_jit_runtime *rt, addr_t guest_pc, ui
 }
 
 int arm64_jit_helper_msr_daif(struct arm64_jit_runtime *rt, addr_t guest_pc) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.misc_helper);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_system);
     rt->resume_pc = guest_pc + 4;
     rt->cpu->pc = guest_pc + 4;
     rt->exit_interrupt = INT_NONE;
@@ -1207,7 +1305,7 @@ int arm64_jit_helper_tbz_tbnz(struct arm64_jit_runtime *rt, addr_t guest_pc, uin
 }
 
 int arm64_jit_helper_exec_dp_imm(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_dp_imm);
     struct cpu_state *cpu = rt->cpu;
     bool sf = ARM64_SF(insn);
 
@@ -1385,7 +1483,7 @@ int arm64_jit_helper_exec_dp_imm(struct arm64_jit_runtime *rt, addr_t guest_pc, 
 }
 
 int arm64_jit_helper_exec_dp_reg(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_dp_reg);
     struct cpu_state *cpu = rt->cpu;
     bool sf = ARM64_SF(insn);
     uint32_t top5 = (insn >> 24) & 0x1f;
@@ -1728,7 +1826,7 @@ int arm64_jit_helper_exec_dp_reg(struct arm64_jit_runtime *rt, addr_t guest_pc, 
 }
 
 int arm64_jit_c_ldr_imm_unsigned(struct arm64_jit_runtime *rt, uint64_t packed0, uint64_t packed1) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_ldr_uimm);
     addr_t guest_pc = (addr_t) packed0;
     uint32_t rt_reg = packed1 & 0x1f;
     uint32_t rn_reg = (packed1 >> 5) & 0x1f;
@@ -1808,7 +1906,7 @@ int arm64_jit_c_ldr_imm_unsigned(struct arm64_jit_runtime *rt, uint64_t packed0,
 }
 
 int arm64_jit_c_str_imm_unsigned(struct arm64_jit_runtime *rt, uint64_t packed) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_str_uimm);
     addr_t guest_pc = (addr_t) (packed & 0xffffffffu);
     uint32_t rt_reg = (packed >> 32) & 0x1f;
     uint32_t rn_reg = (packed >> 37) & 0x1f;
@@ -1841,7 +1939,7 @@ int arm64_jit_c_str_imm_unsigned(struct arm64_jit_runtime *rt, uint64_t packed) 
 
 int arm64_jit_c_simd_ldst_imm_unsigned(struct arm64_jit_runtime *rt, addr_t guest_pc,
         uint32_t insn) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_simd_ldst_uimm);
     struct cpu_state *cpu = rt->cpu;
     uint32_t size = (insn >> 30) & 0x3;
     uint32_t opc = (insn >> 22) & 0x3;
@@ -1948,7 +2046,7 @@ int arm64_jit_c_simd_ldst_imm_unsigned(struct arm64_jit_runtime *rt, addr_t gues
 
 int arm64_jit_c_simd_ldst_addr(struct arm64_jit_runtime *rt, uint64_t packed,
         uint64_t guest_addr) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_simd_ldst_addr);
     addr_t guest_pc = (addr_t) (packed >> 32);
     uint32_t insn = (uint32_t) packed;
     struct cpu_state *cpu = rt->cpu;
@@ -2072,7 +2170,7 @@ static int arm64_jit_simd_ldst_multi_num_regs(uint32_t opcode) {
 
 int arm64_jit_c_simd_ldst_multi(struct arm64_jit_runtime *rt, addr_t guest_pc,
         uint32_t insn) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_simd_ldst_multi);
     bool is_no_post = (insn & 0xbfbf0000u) == 0x0c000000u;
     bool is_post = (insn & 0xbfa00000u) == 0x0c800000u;
     if (!is_no_post && !is_post)
@@ -2145,7 +2243,7 @@ int arm64_jit_c_simd_ldst_multi(struct arm64_jit_runtime *rt, addr_t guest_pc,
 }
 
 int arm64_jit_c_ldst_imm9(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_ldst_imm9);
     uint32_t size = (insn >> 30) & 0x3;
     uint32_t V = (insn >> 26) & 1;
     uint32_t opc = (insn >> 22) & 0x3;
@@ -2368,7 +2466,7 @@ int arm64_jit_c_ldst_imm9(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_
 }
 
 int arm64_jit_c_ldst_regoff(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_ldst_regoff);
     uint32_t size = (insn >> 30) & 0x3;
     uint32_t V = (insn >> 26) & 1;
     uint32_t opc = (insn >> 22) & 0x3;
@@ -2568,7 +2666,7 @@ int arm64_jit_c_ldst_regoff(struct arm64_jit_runtime *rt, addr_t guest_pc, uint3
 }
 
 int arm64_jit_c_ldst_pair(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_ldst_pair);
     uint32_t opc = (insn >> 30) & 0x3;
     uint32_t V = (insn >> 26) & 1;
     uint32_t mode = (insn >> 23) & 0x7;
@@ -3764,7 +3862,7 @@ static bool arm64_jit_verify_snapshot_compare_after(const struct arm64_jit_verif
 }
 
 int arm64_jit_c_ldst_excl(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
-    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.c_helper_total);
+    arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_ldst_excl);
     uint32_t size = (insn >> 30) & 0x3;
     uint32_t o2 = (insn >> 23) & 1;
     uint32_t L = (insn >> 22) & 1;

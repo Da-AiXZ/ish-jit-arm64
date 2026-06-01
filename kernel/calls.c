@@ -1,5 +1,7 @@
 #include <string.h>
 #include <errno.h>
+#include <stdbool.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -34,6 +36,29 @@ extern size_t syscall_table_size;
 
 void dump_stack(int lines);
 void dump_maps(void);
+
+#ifdef GUEST_ARM64
+#include "jit/guest-arm64/jit.h"
+
+static int syscall_segment_profile_mode(void) {
+    static int mode = -1;
+    if (mode == -1) {
+        const char *env = getenv("ISH_SYSCALL_SEGMENT_PROFILE");
+        mode = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+    return mode;
+}
+
+static uint64_t monotonic_time_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t) ts.tv_sec * 1000000000ull + (uint64_t) ts.tv_nsec;
+}
+
+static __thread uint64_t syscall_segment_last_exit_ns;
+static __thread uint64_t syscall_segment_index;
+static __thread struct arm64_jit_helper_profile_snapshot syscall_segment_last_jit_profile;
+#endif
 
 // Fast path syscall handlers (forward declarations)
 #ifdef GUEST_ARM64
@@ -72,6 +97,17 @@ void handle_interrupt(int interrupt) {
 #elif defined(GUEST_ARM64)
         // ARM64: syscall number in x8, args in x0-x5, return in x0
         unsigned syscall_num = cpu->regs[8];
+        bool segment_profile = syscall_segment_profile_mode();
+        uint64_t segment_index = 0;
+        uint64_t syscall_enter_ns = 0;
+        uint64_t guest_segment_ns = 0;
+        addr_t syscall_pc = cpu->pc;
+        if (segment_profile) {
+            syscall_enter_ns = monotonic_time_ns();
+            segment_index = ++syscall_segment_index;
+            if (syscall_segment_last_exit_ns != 0)
+                guest_segment_ns = syscall_enter_ns - syscall_segment_last_exit_ns;
+        }
 
         // === FAST PATH: Hot syscalls ===
         int fast_result = -1;  // -1 means fast path not taken
@@ -167,6 +203,93 @@ void handle_interrupt(int interrupt) {
         // loop where receive_signals() handles SIGKILL. Catch it here.
         if (current->group->doing_group_exit)
             do_exit(current->group->group_exit_code);
+        if (segment_profile) {
+            uint64_t syscall_exit_ns = monotonic_time_ns();
+            struct arm64_jit_helper_profile_snapshot jit_profile = {0};
+            struct arm64_jit_helper_profile_snapshot jit_delta = {0};
+            arm64_jit_get_helper_profile_snapshot(&jit_profile);
+            jit_delta.dispatch_blocks = jit_profile.dispatch_blocks -
+                    syscall_segment_last_jit_profile.dispatch_blocks;
+            jit_delta.c_helper_total = jit_profile.c_helper_total -
+                    syscall_segment_last_jit_profile.c_helper_total;
+            jit_delta.c_dp_imm = jit_profile.c_dp_imm - syscall_segment_last_jit_profile.c_dp_imm;
+            jit_delta.c_dp_reg = jit_profile.c_dp_reg - syscall_segment_last_jit_profile.c_dp_reg;
+            jit_delta.c_ldr_uimm = jit_profile.c_ldr_uimm -
+                    syscall_segment_last_jit_profile.c_ldr_uimm;
+            jit_delta.c_str_uimm = jit_profile.c_str_uimm -
+                    syscall_segment_last_jit_profile.c_str_uimm;
+            jit_delta.c_simd_ldst_uimm = jit_profile.c_simd_ldst_uimm -
+                    syscall_segment_last_jit_profile.c_simd_ldst_uimm;
+            jit_delta.c_simd_ldst_addr = jit_profile.c_simd_ldst_addr -
+                    syscall_segment_last_jit_profile.c_simd_ldst_addr;
+            jit_delta.c_simd_ldst_multi = jit_profile.c_simd_ldst_multi -
+                    syscall_segment_last_jit_profile.c_simd_ldst_multi;
+            jit_delta.c_ldst_imm9 = jit_profile.c_ldst_imm9 -
+                    syscall_segment_last_jit_profile.c_ldst_imm9;
+            jit_delta.c_ldst_regoff = jit_profile.c_ldst_regoff -
+                    syscall_segment_last_jit_profile.c_ldst_regoff;
+            jit_delta.c_ldst_pair = jit_profile.c_ldst_pair -
+                    syscall_segment_last_jit_profile.c_ldst_pair;
+            jit_delta.c_ldst_excl = jit_profile.c_ldst_excl -
+                    syscall_segment_last_jit_profile.c_ldst_excl;
+            jit_delta.c_system = jit_profile.c_system - syscall_segment_last_jit_profile.c_system;
+            jit_delta.control_total = jit_profile.control_total -
+                    syscall_segment_last_jit_profile.control_total;
+            jit_delta.control_dispatch = jit_profile.control_dispatch -
+                    syscall_segment_last_jit_profile.control_dispatch;
+            jit_delta.control_branch_reg = jit_profile.control_branch_reg -
+                    syscall_segment_last_jit_profile.control_branch_reg;
+            jit_delta.control_cbz_cbnz = jit_profile.control_cbz_cbnz -
+                    syscall_segment_last_jit_profile.control_cbz_cbnz;
+            jit_delta.control_b_cond = jit_profile.control_b_cond -
+                    syscall_segment_last_jit_profile.control_b_cond;
+            jit_delta.control_tbz_tbnz = jit_profile.control_tbz_tbnz -
+                    syscall_segment_last_jit_profile.control_tbz_tbnz;
+            jit_delta.syscall = jit_profile.syscall - syscall_segment_last_jit_profile.syscall;
+            jit_delta.unsupported = jit_profile.unsupported -
+                    syscall_segment_last_jit_profile.unsupported;
+            jit_delta.misc_helper = jit_profile.misc_helper - syscall_segment_last_jit_profile.misc_helper;
+            syscall_segment_last_jit_profile = jit_profile;
+            syscall_segment_last_exit_ns = syscall_exit_ns;
+            fprintf(stderr,
+                    "[syscall-segment] index=%llu pid=%d comm=%s pc=0x%llx syscall=%u "
+                    "guest_ns=%llu syscall_ns=%llu x0=0x%llx "
+                    "jit_blocks=%llu jit_c_helper=%llu jit_control=%llu "
+                    "jit_dispatch=%llu jit_branch_reg=%llu jit_b_cond=%llu "
+                    "jit_cbz=%llu jit_tbz=%llu "
+                    "jit_c_dp_imm=%llu jit_c_dp_reg=%llu jit_c_ldr_uimm=%llu "
+                    "jit_c_str_uimm=%llu jit_c_simd_uimm=%llu jit_c_simd_addr=%llu "
+                    "jit_c_simd_multi=%llu jit_c_imm9=%llu jit_c_regoff=%llu "
+                    "jit_c_pair=%llu jit_c_excl=%llu jit_c_system=%llu\n",
+                    (unsigned long long) segment_index,
+                    current->pid,
+                    current->comm,
+                    (unsigned long long) syscall_pc,
+                    syscall_num,
+                    (unsigned long long) guest_segment_ns,
+                    (unsigned long long) (syscall_exit_ns - syscall_enter_ns),
+                    (unsigned long long) cpu->regs[0],
+                    (unsigned long long) jit_delta.dispatch_blocks,
+                    (unsigned long long) jit_delta.c_helper_total,
+                    (unsigned long long) jit_delta.control_total,
+                    (unsigned long long) jit_delta.control_dispatch,
+                    (unsigned long long) jit_delta.control_branch_reg,
+                    (unsigned long long) jit_delta.control_b_cond,
+                    (unsigned long long) jit_delta.control_cbz_cbnz,
+                    (unsigned long long) jit_delta.control_tbz_tbnz,
+                    (unsigned long long) jit_delta.c_dp_imm,
+                    (unsigned long long) jit_delta.c_dp_reg,
+                    (unsigned long long) jit_delta.c_ldr_uimm,
+                    (unsigned long long) jit_delta.c_str_uimm,
+                    (unsigned long long) jit_delta.c_simd_ldst_uimm,
+                    (unsigned long long) jit_delta.c_simd_ldst_addr,
+                    (unsigned long long) jit_delta.c_simd_ldst_multi,
+                    (unsigned long long) jit_delta.c_ldst_imm9,
+                    (unsigned long long) jit_delta.c_ldst_regoff,
+                    (unsigned long long) jit_delta.c_ldst_pair,
+                    (unsigned long long) jit_delta.c_ldst_excl,
+                    (unsigned long long) jit_delta.c_system);
+        }
 #endif
         ISH_SIGNPOST_SCOPE_END(syscall, "syscall", _sc_spid);
     } else if (interrupt == INT_GPF) {

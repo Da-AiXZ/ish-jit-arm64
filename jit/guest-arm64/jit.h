@@ -216,6 +216,34 @@ struct arm64_jit_tlb_profile {
 
 extern struct arm64_jit_tlb_profile g_arm64_jit_tlb_profile;
 
+struct arm64_jit_helper_profile_snapshot {
+    uint64_t dispatch_blocks;
+    uint64_t c_helper_total;
+    uint64_t c_dp_imm;
+    uint64_t c_dp_reg;
+    uint64_t c_ldr_uimm;
+    uint64_t c_str_uimm;
+    uint64_t c_simd_ldst_uimm;
+    uint64_t c_simd_ldst_addr;
+    uint64_t c_simd_ldst_multi;
+    uint64_t c_ldst_imm9;
+    uint64_t c_ldst_regoff;
+    uint64_t c_ldst_pair;
+    uint64_t c_ldst_excl;
+    uint64_t c_system;
+    uint64_t control_total;
+    uint64_t control_dispatch;
+    uint64_t control_branch_reg;
+    uint64_t control_cbz_cbnz;
+    uint64_t control_b_cond;
+    uint64_t control_tbz_tbnz;
+    uint64_t syscall;
+    uint64_t unsupported;
+    uint64_t misc_helper;
+};
+
+void arm64_jit_get_helper_profile_snapshot(struct arm64_jit_helper_profile_snapshot *out);
+
 #ifdef ISH_ARM64_JIT_PERF_COUNTERS
 struct arm64_jit_branch_fast_profile {
     _Atomic uint64_t same_fragment_hits;
