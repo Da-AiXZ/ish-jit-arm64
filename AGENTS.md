@@ -401,10 +401,32 @@ Important invariants for future JIT-to-JIT transfer work:
 - Same-fragment jumps should use fragment-local guest PC to host offset mapping.
   Cross-fragment jumps must account for different cached-register maps before
   branching into the destination body.
-- Local backward/self branches are intentionally routed through the helper path
-  instead of staying inside one fragment. This provides a runtime safepoint for
-  timers, handoff debugging, and progress logging, and avoids unobservable
-  host-side infinite loops inside one compiled fragment.
+- Non-self local backward branches may stay inside fragments for performance.
+  Exact self-branches route through the helper path. If the local-fixup table is
+  full, the emitter must fall back to the helper path instead of emitting an
+  unpatched placeholder branch; an unpatched `b #0` is a host self-loop bug.
+
+### Fragment TLB Probe State
+
+`ISH_ARM64_JIT_FRAGMENT_TLB_FAST=1` currently enables fragment-TLB allocation,
+population, and runtime exposure to JIT helpers. The direct cross-fragment
+branch in `_arm64_jit_helper_branch_reg_fast_jitabi` is intentionally disabled
+behind an unconditional branch while the light JIT-to-JIT enter/exit ABI is
+unfinished.
+
+Important lesson from the first direct-handoff probe:
+
+- A RET target can be a return into a caller frame that is currently suspended
+  inside the C-managed direct-call helper. Directly jumping to that caller
+  fragment creates another caller fragment frame instead of returning to the
+  suspended helper continuation.
+- Any future direct cross-fragment transfer must make fragment-boundary state
+  explicit: target block, target spill/reload snippets, target entry resolver,
+  and whether the source context is top-level dispatch or a nested helper
+  continuation.
+- The fragment-TLB entry currently stores page tag, valid range, target block,
+  target entry resolver, and target spill/reload snippets. The assembly probe
+  assumes the entry size is 64 bytes.
 
 ## Best Practices
 

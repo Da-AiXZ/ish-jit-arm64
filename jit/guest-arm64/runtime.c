@@ -321,10 +321,14 @@ static struct arm64_jit_state *arm64_jit_state_new(struct mmu *mmu) {
     state->entry_hash = calloc(state->entry_hash_size, sizeof(struct list));
     state->entry_cache_size = ARM64_JIT_ENTRY_CACHE_SIZE;
     state->entry_cache = calloc(state->entry_cache_size, sizeof(*state->entry_cache));
+    state->fragment_tlb_size = ARM64_JIT_FRAGMENT_TLB_SIZE;
+    state->fragment_tlb = calloc(state->fragment_tlb_size, sizeof(*state->fragment_tlb));
     state->page_hash = calloc(ARM64_JIT_PAGE_HASH_SIZE, sizeof(*state->page_hash));
     if (state->hash == NULL || state->entry_hash == NULL ||
-            state->entry_cache == NULL || state->page_hash == NULL) {
+            state->entry_cache == NULL || state->fragment_tlb == NULL ||
+            state->page_hash == NULL) {
         free(state->page_hash);
+        free(state->fragment_tlb);
         free(state->entry_cache);
         free(state->entry_hash);
         free(state->hash);
@@ -393,6 +397,17 @@ int arm64_jit_branch_reg_fast_mode(void) {
     static int fast_mode = -1;
     if (fast_mode == -1) {
         const char *env = getenv("ISH_ARM64_JIT_BRANCH_REG_FAST");
+        const char *frag_env = getenv("ISH_ARM64_JIT_FRAGMENT_TLB_FAST");
+        fast_mode = ((env != NULL && env[0] == '1') ||
+                (frag_env != NULL && frag_env[0] == '1')) ? 1 : 0;
+    }
+    return fast_mode;
+}
+
+static int arm64_jit_fragment_tlb_fast_mode(void) {
+    static int fast_mode = -1;
+    if (fast_mode == -1) {
+        const char *env = getenv("ISH_ARM64_JIT_FRAGMENT_TLB_FAST");
         fast_mode = (env != NULL && env[0] == '1') ? 1 : 0;
     }
     return fast_mode;
@@ -875,7 +890,7 @@ int arm64_jit_helper_branch_reg(struct arm64_jit_runtime *rt, addr_t guest_pc, u
     arm64_jit_profile_inc(&g_arm64_jit_helper_profile.control_branch_reg);
     uint32_t opc = (insn >> 21) & 0xf;
     uint32_t rn = ARM64_RN(insn);
-    uint64_t target = arm64_jit_read_gpr(rt->cpu, rn, false);
+    uint64_t target = arm64_jit_read_gpr(rt->cpu, rn, false) & 0xffffffffffffull;
     if (arm64_jit_branch_reg_trace_mode()) {
         fprintf(stderr,
                 "[arm64-jit-branch-reg] pc=0x%llx opc=%u rn=%u target=0x%llx x16=0x%llx x17=0x%llx x30=0x%llx debug=0x%llx/0x%llx/0x%llx/0x%llx\n",
@@ -3221,6 +3236,43 @@ static void arm64_jit_update_entry_cache(struct arm64_jit_state *state, addr_t p
     cache->invalidate_gen = state->invalidate_gen;
 }
 
+static size_t arm64_jit_fragment_tlb_index(const struct arm64_jit_state *state, addr_t pc) {
+    return ((size_t) pc >> 12) % state->fragment_tlb_size;
+}
+
+static void arm64_jit_update_fragment_tlb_page(struct arm64_jit_state *state, addr_t page_pc,
+        struct arm64_jit_block *block) {
+    if (state->fragment_tlb == NULL || state->fragment_tlb_size == 0 ||
+            block == NULL || block->code_rx == NULL || block->is_jetsam ||
+            block->jit_entry_fn == NULL)
+        return;
+    addr_t page_start = page_pc & ~(addr_t) (PAGE_SIZE - 1);
+    addr_t page_end = page_start + PAGE_SIZE;
+    addr_t start_pc = block->start_pc > page_start ? block->start_pc : page_start;
+    addr_t end_pc = block->end_pc < page_end ? block->end_pc : page_end;
+    if (start_pc >= end_pc)
+        return;
+    struct arm64_jit_fragment_tlb_entry *cache =
+            &state->fragment_tlb[arm64_jit_fragment_tlb_index(state, page_pc)];
+    cache->page_tag = page_pc >> PAGE_BITS;
+    cache->start_pc = start_pc;
+    cache->end_pc = end_pc;
+    cache->invalidate_gen = state->invalidate_gen;
+    cache->block = block;
+    cache->jit_entry_fn = block->jit_entry_fn;
+    cache->spill_state_fn = block->spill_state_fn;
+    cache->reload_state_fn = block->reload_state_fn;
+}
+
+static void arm64_jit_update_fragment_tlb(struct arm64_jit_state *state,
+        struct arm64_jit_block *block) {
+    if (block == NULL)
+        return;
+    arm64_jit_update_fragment_tlb_page(state, block->start_pc, block);
+    if (block->end_pc != 0 && ((block->end_pc - 1) >> PAGE_BITS) != (block->start_pc >> PAGE_BITS))
+        arm64_jit_update_fragment_tlb_page(state, block->end_pc - 1, block);
+}
+
 static bool arm64_jit_block_has_valid_entry_for_pc(const struct arm64_jit_block *block, addr_t pc) {
     if (block == NULL || block->code_rx == NULL || block->is_jetsam)
         return false;
@@ -3340,6 +3392,7 @@ static void arm64_jit_insert(struct arm64_jit_state *state, struct arm64_jit_blo
         list_init_add(&block->entrypoints, &ep->block_chain);
     }
     arm64_jit_supersede_contained_blocks(state, block);
+    arm64_jit_update_fragment_tlb(state, block);
 }
 
 static bool arm64_jit_resolve_entry(struct arm64_jit_state *state, struct tlb *tlb,
@@ -3385,8 +3438,10 @@ static bool arm64_jit_resolve_entry(struct arm64_jit_state *state, struct tlb *t
             }
         }
     }
-    if (block != NULL)
+    if (block != NULL) {
         arm64_jit_update_entry_cache(state, pc, block, entry_index);
+        arm64_jit_update_fragment_tlb(state, block);
+    }
     unlock(&state->lock);
 
     if (block == NULL || block->code_rx == NULL)
@@ -4234,6 +4289,9 @@ static void arm64_jit_dump_guest_window(struct tlb *tlb, addr_t guest_pc) {
 
 static int arm64_jit_run_block_from_index(struct arm64_jit_block *block, uint32_t entry_index,
         struct cpu_state *cpu, struct tlb *tlb) {
+    struct arm64_jit_state *state = arm64_jit_state_for_mmu(cpu->mmu);
+    bool fragment_tlb_fast = arm64_jit_fragment_tlb_fast_mode() && state != NULL &&
+            g_arm64_jit_direct_call_depth == 0;
     struct arm64_jit_runtime rt = {
         .cpu = cpu,
         .tlb = tlb,
@@ -4244,6 +4302,9 @@ static int arm64_jit_run_block_from_index(struct arm64_jit_block *block, uint32_
         .fault_pc = block->insn_pcs[entry_index],
         .exit_interrupt = INT_NONE,
         .entry_target = NULL,
+        .fragment_tlb = fragment_tlb_fast ? state->fragment_tlb : NULL,
+        .fragment_tlb_size = fragment_tlb_fast ? state->fragment_tlb_size : 0,
+        .invalidate_gen = fragment_tlb_fast ? state->invalidate_gen : 0,
     };
     if (!arm64_jit_verify_mode() &&
             !(g_arm64_jit_direct_call_depth != 0 && arm64_jit_nested_no_timer_mode()) &&
@@ -4463,8 +4524,10 @@ int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb) {
                 }
             }
         }
-        if (block != NULL)
+        if (block != NULL) {
             arm64_jit_update_entry_cache(state, cpu->pc, block, entry_index);
+            arm64_jit_update_fragment_tlb(state, block);
+        }
         unlock(&state->lock);
 
         if (block == NULL || block->code_rx == NULL) {

@@ -20,6 +20,7 @@
 #define ARM64_JIT_HASH_SIZE (1 << 10)
 #define ARM64_JIT_PAGE_HASH_SIZE (1 << 10)
 #define ARM64_JIT_ENTRY_CACHE_SIZE (1 << 12)
+#define ARM64_JIT_FRAGMENT_TLB_SIZE (1 << 12)
 #define ARM64_JIT_MAX_INSNS 1024
 #define ARM64_JIT_MAX_PC_MAP 2048
 #define ARM64_JIT_MAX_FIXUPS 2048
@@ -83,6 +84,10 @@ struct arm64_jit_local_fixup {
     uint32_t kind;
 };
 
+struct arm64_jit_backedge_safepoint {
+    addr_t target_pc;
+};
+
 struct arm64_jit_verify_site {
     uint32_t host_offset;
     addr_t guest_pc;
@@ -122,6 +127,7 @@ struct arm64_jit_block {
     uint32_t entry_thunks_offset;
     uint32_t insn_host_offsets[ARM64_JIT_MAX_INSNS];
     void *entry_code[ARM64_JIT_MAX_INSNS];
+    void *jit_entry_fn;
     uint32_t pc_map_count;
     struct arm64_jit_pc_map pc_map[ARM64_JIT_MAX_PC_MAP];
     uint32_t verify_site_count;
@@ -130,6 +136,8 @@ struct arm64_jit_block {
     struct arm64_jit_local_fixup fixups[ARM64_JIT_MAX_FIXUPS];
     uint32_t disabled_local_fixup_count;
     addr_t disabled_local_fixup_pcs[ARM64_JIT_MAX_FIXUPS];
+    uint32_t backedge_safepoint_count;
+    struct arm64_jit_backedge_safepoint backedge_safepoints[ARM64_JIT_MAX_FIXUPS];
 };
 
 struct arm64_jit_entrypoint {
@@ -147,6 +155,17 @@ struct arm64_jit_entry_cache_entry {
     unsigned invalidate_gen;
 };
 
+struct arm64_jit_fragment_tlb_entry {
+    addr_t page_tag;
+    addr_t start_pc;
+    addr_t end_pc;
+    unsigned invalidate_gen;
+    struct arm64_jit_block *block;
+    void *jit_entry_fn;
+    void *spill_state_fn;
+    void *reload_state_fn;
+};
+
 struct arm64_jit_state {
     struct mmu *mmu;
     struct list *hash;
@@ -155,6 +174,8 @@ struct arm64_jit_state {
     size_t entry_hash_size;
     struct arm64_jit_entry_cache_entry *entry_cache;
     size_t entry_cache_size;
+    struct arm64_jit_fragment_tlb_entry *fragment_tlb;
+    size_t fragment_tlb_size;
     struct arm64_jit_page_bucket *page_hash;
     struct list jetsam;
     lock_t lock;
@@ -176,6 +197,9 @@ struct arm64_jit_runtime {
     uint64_t debug2;
     uint64_t debug3;
     void *entry_target;
+    struct arm64_jit_fragment_tlb_entry *fragment_tlb;
+    size_t fragment_tlb_size;
+    unsigned invalidate_gen;
 };
 
 struct arm64_jit_tlb_profile {
@@ -292,6 +316,7 @@ int arm64_jit_helper_ldst_pair_vec_live(struct arm64_jit_runtime *rt, uint64_t p
 
 int arm64_jit_helper_unsupported_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_syscall_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
+int arm64_jit_helper_timer_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_verify_trap_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_dispatch_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_branch_link_jitabi(struct arm64_jit_runtime *rt, uint64_t packed);
@@ -373,7 +398,7 @@ void arm64_jit_emit_load_cached_state(struct arm64_jit_emitter *e);
 void arm64_jit_emit_spill_cached_state(struct arm64_jit_emitter *e);
 void arm64_jit_emit_helper_return(struct arm64_jit_emitter *e, void *helper, addr_t guest_pc);
 bool arm64_jit_block_has_pc(const struct arm64_jit_block *block, addr_t guest_pc);
-void arm64_jit_emit_local_fixup(struct arm64_jit_emitter *e, addr_t branch_pc, addr_t target_pc, uint32_t kind);
+bool arm64_jit_emit_local_fixup(struct arm64_jit_emitter *e, addr_t branch_pc, addr_t target_pc, uint32_t kind);
 bool arm64_jit_patch_local_fixups(struct arm64_jit_block *block, uint8_t *buf);
 
 enum arm64_jit_emit_result arm64_jit_emit_dp_imm(struct arm64_jit_emitter *e, uint32_t insn, addr_t guest_pc);

@@ -88,7 +88,6 @@
 //   bench_integer_lookups = 0
 //   bench_integer_hits = 8
 //   bench_integer_misses = 16
-
 .extern _g_arm64_jit_tlb_profile
 
 .macro JIT_TLB_LOOKUP_READ_HIT guest_addr, out_reg, scratch0, scratch1, miss_label
@@ -456,6 +455,25 @@
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #96
     ret
+.endm
+
+.macro JIT_FRAGMENT_EPILOGUE_AND_BR_X17
+    ldr q8, [sp]
+    ldr q9, [sp, #16]
+    ldr q10, [sp, #32]
+    ldr q11, [sp, #48]
+    ldr q12, [sp, #64]
+    ldr q13, [sp, #80]
+    ldr q14, [sp, #96]
+    ldr q15, [sp, #112]
+    add sp, sp, #128
+    ldp x27, x28, [sp, #80]
+    ldp x25, x26, [sp, #64]
+    ldp x23, x24, [sp, #48]
+    ldp x21, x22, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #96
+    br x17
 .endm
 
 // Common page-aligned TLB lookup for scalar live memory helpers.
@@ -3813,6 +3831,7 @@ _arm64_jit_helper_ldst_pair_vec_live:
 
 JITABI_WRAP1 _arm64_jit_helper_unsupported_jitabi, _arm64_jit_helper_unsupported
 JITABI_WRAP1 _arm64_jit_helper_syscall_jitabi, _arm64_jit_helper_syscall
+JITABI_WRAP1 _arm64_jit_helper_timer_jitabi, _arm64_jit_helper_timer
 .globl _arm64_jit_helper_verify_trap_jitabi
 _arm64_jit_helper_verify_trap_jitabi:
     stp x29, x30, [sp, #-48]!
@@ -3853,21 +3872,22 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
     stp x2, x3, [sp, #48]
     str x4, [sp, #64]
 
-    // Experimental opt-in branch-reg resolver. Falls back to the normal C
-    // helper path on any miss; success tail-branches inside the same fragment.
+    // Experimental opt-in branch-reg resolver. It first handles same-fragment
+    // RET targets. On miss, it probes the fragment TLB for a compiled
+    // cross-fragment target before falling back to the normal C helper path.
     mrs x4, nzcv
     str x4, [sp, #72]
     ubfx x4, x2, #21, #4        // branch-register opc
-    cmp x4, #2                  // RET only for now
+    cmp x4, #2                  // RET only while cross-fragment ABI is validated.
     b.ne 2f
     ldr x16, [x0, #16]          // rt->block
     cbz x16, 2f
     ldr x17, [x16]              // block->start_pc
     cmp x3, x17
-    b.lo 2f
+    b.lo 5f
     ldr x17, [x16, #8]          // block->end_pc
     cmp x3, x17
-    b.hs 2f
+    b.hs 5f
     tst x3, #3
     b.ne 2f
     ldr w17, [x16, #24]         // block->insn_count
@@ -3899,6 +3919,59 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
     ldp x29, x30, [sp], #80
     br x3
 
+5:
+    // Cross-fragment direct handoff is intentionally disabled until the light
+    // JIT-to-JIT enter/exit ABI can distinguish a true top-level transfer from
+    // a return into a C-managed nested direct-call continuation.
+    b 2f
+    ldr x16, [sp, #32]            // rt*
+    ldr x17, [x16, #104]          // rt->fragment_tlb
+    cbz x17, 6f
+    ldr x4, [x16, #112]           // rt->fragment_tlb_size
+    cbz x4, 6f
+    ubfx x4, x3, #12, #12
+    add x4, x17, x4, lsl #6       // entry = base + index * 64
+    ldr w17, [x16, #120]          // rt->invalidate_gen
+    ldr w30, [x4, #24]            // entry.invalidate_gen
+    cmp w30, w17
+    b.ne 6f
+    ldr x17, [x4]                 // entry.page_tag
+    lsr x30, x3, #12
+    cmp x17, x30
+    b.ne 6f
+    ldr x17, [x4, #8]             // entry.start_pc
+    cmp x3, x17
+    b.lo 6f
+    ldr x17, [x4, #16]            // entry.end_pc
+    cmp x3, x17
+    b.hs 6f
+    ldr x16, [x4, #32]            // entry.block
+    cbz x16, 6f
+    ldr x17, [x4, #40]            // entry.jit_entry_fn
+    cbz x17, 6f
+    str x16, [sp, #48]            // preserve target block; insn no longer needed on RET-only path
+    ldr x16, [x4, #48]            // entry.spill_state_fn
+    str x16, [sp, #40]
+    ldr x16, [x4, #56]            // entry.reload_state_fn
+    str x16, [sp, #24]
+    ldr x0, [sp, #32]             // rt*
+    ldr x3, [sp, #56]             // target_pc
+    ldr x16, [sp, #48]            // entry.block
+    ldr x4, [sp, #72]
+    msr nzcv, x4
+    ldr x4, [sp, #64]
+    str x16, [x0, #16]            // rt->block
+    str x17, [x0, #96]            // rt->entry_target
+    ldr x16, [sp, #40]
+    str x16, [x0, #24]            // rt->spill_state_fn
+    ldr x16, [sp, #24]
+    str x16, [x0, #32]            // rt->reload_state_fn
+    mov x1, x3                    // target_pc for target entry resolver
+    ldr x16, [sp, #16]
+    ldp x29, x30, [sp], #80
+    JIT_FRAGMENT_EPILOGUE_AND_BR_X17
+
+6:
 2:
     // The miss path calls the fragment spill snippet. Restore any live JIT
     // state touched by this probe before spilling cached guest registers.
@@ -3927,6 +4000,7 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
     ldp x16, x17, [sp, #16]
     ldp x29, x30, [sp], #80
     ret
+
 JITABI_WRAP2 _arm64_jit_helper_ldst_imm9_jitabi, _arm64_jit_helper_ldst_imm9
 JITABI_WRAP2_SUCCESS _arm64_jit_helper_ldst_imm9_success_jitabi, _arm64_jit_helper_ldst_imm9
 JITABI_WRAP2 _arm64_jit_helper_ldst_regoff_jitabi, _arm64_jit_helper_ldst_regoff
