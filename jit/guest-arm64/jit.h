@@ -138,6 +138,9 @@ struct arm64_jit_block {
     addr_t disabled_local_fixup_pcs[ARM64_JIT_MAX_FIXUPS];
     uint32_t backedge_safepoint_count;
     struct arm64_jit_backedge_safepoint backedge_safepoints[ARM64_JIT_MAX_FIXUPS];
+    void *light_spill_state_fn;
+    uint32_t light_spill_code_offset;
+    bool light_spill_fp_state;
 };
 
 struct arm64_jit_entrypoint {
@@ -164,6 +167,8 @@ struct arm64_jit_fragment_tlb_entry {
     void *jit_entry_fn;
     void *spill_state_fn;
     void *reload_state_fn;
+    void *light_spill_state_fn;
+    void *reserved[7];
 };
 
 struct arm64_jit_state {
@@ -200,6 +205,7 @@ struct arm64_jit_runtime {
     struct arm64_jit_fragment_tlb_entry *fragment_tlb;
     size_t fragment_tlb_size;
     unsigned invalidate_gen;
+    void (*light_spill_state_fn)(struct arm64_jit_runtime *rt);
 };
 
 struct arm64_jit_tlb_profile {
@@ -209,6 +215,16 @@ struct arm64_jit_tlb_profile {
 };
 
 extern struct arm64_jit_tlb_profile g_arm64_jit_tlb_profile;
+
+#ifdef ISH_ARM64_JIT_PERF_COUNTERS
+struct arm64_jit_branch_fast_profile {
+    _Atomic uint64_t same_fragment_hits;
+    _Atomic uint64_t fragment_tlb_hits;
+    _Atomic uint64_t misses;
+};
+
+extern struct arm64_jit_branch_fast_profile g_arm64_jit_branch_fast_profile;
+#endif
 
 struct arm64_jit_emitter {
     struct arm64_jit_state *state;
@@ -265,8 +281,6 @@ int arm64_jit_helper_syscall(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_timer(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_verify_trap(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_dispatch(struct arm64_jit_runtime *rt, addr_t guest_pc);
-int arm64_jit_helper_branch_link(struct arm64_jit_runtime *rt, uint64_t packed);
-int arm64_jit_helper_call_direct(struct arm64_jit_runtime *rt, uint64_t packed);
 int arm64_jit_helper_branch_reg(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_branch_reg_fast_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc,
         uint32_t insn, uint64_t target);
@@ -319,8 +333,6 @@ int arm64_jit_helper_syscall_jitabi(struct arm64_jit_runtime *rt, addr_t guest_p
 int arm64_jit_helper_timer_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_verify_trap_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_dispatch_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
-int arm64_jit_helper_branch_link_jitabi(struct arm64_jit_runtime *rt, uint64_t packed);
-int arm64_jit_helper_call_direct_jitabi(struct arm64_jit_runtime *rt, uint64_t packed);
 int arm64_jit_helper_branch_reg_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_cbz_cbnz_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_b_cond_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);

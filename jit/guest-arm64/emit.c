@@ -1,6 +1,7 @@
 #if defined(GUEST_ARM64) && defined(__aarch64__)
 
 #include <errno.h>
+#include <stddef.h>
 #include <sys/mman.h>
 
 #include "jit/guest-arm64/jit.h"
@@ -345,6 +346,33 @@ void arm64_jit_emit_spill_cached_state(struct arm64_jit_emitter *e) {
     }
 }
 
+static void arm64_jit_emit_light_spill_cached_state(struct arm64_jit_emitter *e) {
+    for (uint32_t guest = 0; guest < 31; guest++) {
+        int host = arm64_jit_host_reg_for_guest(e->block, guest);
+        if (host < 0)
+            continue;
+        arm64_jit_emit32(e, arm64_jit_enc_str64_uimm((unsigned) host, ARM64_JIT_HOST_CPU,
+                (CPU_OFFSET(regs[guest]) >> 3)));
+    }
+    arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(ARM64_JIT_HOST_GUEST_SP, ARM64_JIT_HOST_CPU,
+            (CPU_OFFSET(sp) >> 3)));
+    arm64_jit_emit32(e, 0xd53b4210); // mrs x16, nzcv
+    arm64_jit_emit32(e, arm64_jit_enc_str32_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_CPU,
+            (CPU_OFFSET(nzcv) >> 2)));
+    if (!e->block->light_spill_fp_state)
+        return;
+    arm64_jit_emit32(e, 0xd53b4410); // mrs x16, fpcr
+    arm64_jit_emit32(e, arm64_jit_enc_str32_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_CPU,
+            (CPU_OFFSET(fpcr) >> 2)));
+    arm64_jit_emit32(e, 0xd53b4430); // mrs x16, fpsr
+    arm64_jit_emit32(e, arm64_jit_enc_str32_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_CPU,
+            (CPU_OFFSET(fpsr) >> 2)));
+    for (uint32_t v = 0; v < 32; v++) {
+        arm64_jit_emit32(e, arm64_jit_enc_str128_uimm(v, ARM64_JIT_HOST_CPU,
+                ((CPU_OFFSET(fp[0]) >> 4) + v)));
+    }
+}
+
 static void arm64_jit_emit_spill_cached_vreg(struct arm64_jit_emitter *e, uint32_t reg) {
     if (reg >= 32)
         return;
@@ -392,26 +420,20 @@ static void arm64_jit_emit_jit_entry_resolver_snippet(struct arm64_jit_emitter *
             (16 >> 3))); // rt->block
     uint32_t fail_cbz_block = (uint32_t) e->size;
     arm64_jit_emit32(e, 0xb4000010); // cbz x16, fail
+    arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm(ARM64_JIT_HOST_HELPER1, ARM64_JIT_HOST_HELPER0,
+            0)); // block->start_pc
+    arm64_jit_emit32(e, arm64_jit_enc_sub_shift_reg64(ARM64_JIT_HOST_TMP3, ARM64_JIT_HOST_TMP1,
+            ARM64_JIT_HOST_HELPER1, 0)); // byte offset from fragment start
+    arm64_jit_emit32(e, arm64_jit_enc_lsr_imm64(ARM64_JIT_HOST_TMP3, ARM64_JIT_HOST_TMP3, 2));
     arm64_jit_emit32(e, arm64_jit_enc_ldr32_uimm(ARM64_JIT_HOST_HELPER1, ARM64_JIT_HOST_HELPER0,
             (24 >> 2))); // block->insn_count
-    arm64_jit_emit32(e, 0x91008204); // add x4, x16, #32 ; block->insn_pcs
-    uint32_t loop_off = (uint32_t) e->size;
-    uint32_t fail_cbz_count = (uint32_t) e->size;
-    arm64_jit_emit32(e, 0xb4000011); // loop: cbz x17, fail
-    arm64_jit_emit32(e, 0xf840849e); // ldr x30, [x4], #8
-    arm64_jit_emit32(e, arm64_jit_enc_eor_reg64(30, 30, ARM64_JIT_HOST_TMP1)); // eor x30, x30, x1
-    arm64_jit_emit32(e, 0xb400007e); // cbz x30, found
-    arm64_jit_emit32(e, 0xd1000631); // sub x17, x17, #1
-    uint32_t loop_branch_off = (uint32_t) e->size;
-    arm64_jit_emit32(e, arm64_jit_enc_b_imm(((int32_t) loop_off - (int32_t) loop_branch_off) >> 2));
-    arm64_jit_emit32(e, arm64_jit_enc_ldr32_uimm(30, ARM64_JIT_HOST_HELPER0,
-            (24 >> 2))); // found: block->insn_count
-    arm64_jit_emit32(e, arm64_jit_enc_sub_shift_reg64(ARM64_JIT_HOST_TMP3, 30,
-            ARM64_JIT_HOST_HELPER1, 0)); // matched index
+    arm64_jit_emit32(e, 0xeb11007f); // cmp x3, x17
+    uint32_t fail_b_hs_index = (uint32_t) e->size;
+    arm64_jit_emit32(e, 0x54000002); // b.hs fail
     arm64_jit_emit_load_imm64(e, ARM64_JIT_HOST_HELPER1, 37220); // block->insn_host_offsets
     arm64_jit_emit32(e, arm64_jit_enc_add_shift_reg64(ARM64_JIT_HOST_HELPER1,
             ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_HELPER1, 0));
-    arm64_jit_emit32(e, 0xb8647a31); // ldr w17, [x17, x4, lsl #2]
+    arm64_jit_emit32(e, 0xb8637a31); // ldr w17, [x17, x3, lsl #2]
     arm64_jit_emit32(e, 0x3100063f); // cmn w17, #1
     uint32_t fail_b_eq_off = (uint32_t) e->size;
     arm64_jit_emit32(e, 0x54000000); // b.eq fail
@@ -430,6 +452,13 @@ static void arm64_jit_emit_jit_entry_resolver_snippet(struct arm64_jit_emitter *
     arm64_jit_emit_load_imm64(e, ARM64_JIT_HOST_HELPER0, 0); // fail: rt->entry_target = NULL
     arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_TMP0,
             (96 >> 3)));
+    arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(ARM64_JIT_HOST_TMP1, ARM64_JIT_HOST_TMP0,
+            (40 >> 3))); // rt->resume_pc = target_pc
+    arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_TMP0,
+            0)); // rt->cpu
+    arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(ARM64_JIT_HOST_TMP1, ARM64_JIT_HOST_HELPER0,
+            (CPU_OFFSET(pc) >> 3)));
+    arm64_jit_emit32(e, 0x12800000); // mov w0, #-1
     arm64_jit_emit32(e, 0xa8c17bfd); // ldp x29, x30, [sp], #16
     arm64_jit_emit32(e, arm64_jit_enc_ret(30));
 
@@ -438,7 +467,7 @@ static void arm64_jit_emit_jit_entry_resolver_snippet(struct arm64_jit_emitter *
     *slot = arm64_jit_enc_b_imm(byte_delta >> 2);
 
     arm64_jit_patch_cond_branch_to_here(e, fail_cbz_block);
-    arm64_jit_patch_cond_branch_to_here(e, fail_cbz_count);
+    arm64_jit_patch_cond_branch_to_here(e, fail_b_hs_index);
     arm64_jit_patch_cond_branch_to_here(e, fail_b_eq_off);
     (void) fail_off;
 }
@@ -468,7 +497,6 @@ static void arm64_jit_emit_helper_return_regarg(struct arm64_jit_emitter *e, voi
 
 static void arm64_jit_emit_helper_return_branch_reg_fast(struct arm64_jit_emitter *e,
         addr_t guest_pc, uint32_t insn) {
-    arm64_jit_emit_spill_cached_state(e);
     uint32_t rn = ARM64_RN(insn);
     arm64_jit_emit_load_imm64(e, 1, guest_pc);
     arm64_jit_emit_load_imm64(e, 2, insn);
@@ -536,16 +564,6 @@ static void arm64_jit_emit_backedge_safepoint(struct arm64_jit_emitter *e, addr_
     arm64_jit_emit32(e, 0xd51b4210); // msr nzcv, x16
 }
 
-static void arm64_jit_emit_helper_return_packed1(struct arm64_jit_emitter *e, void *helper,
-        uint64_t x1_imm) {
-    arm64_jit_emit_spill_cached_state(e);
-    arm64_jit_emit_load_imm64(e, 1, x1_imm);
-    arm64_jit_emit32(e, arm64_jit_enc_mov_reg(0, 21));
-    arm64_jit_emit_load_imm64(e, 16, (uint64_t) helper);
-    arm64_jit_emit32(e, arm64_jit_enc_blr(16));
-    arm64_jit_emit_epilogue(e);
-}
-
 static void arm64_jit_emit_helper_continue_packed1(struct arm64_jit_emitter *e, void *helper,
         uint64_t x1_imm) {
     arm64_jit_emit_load_imm64(e, 1, x1_imm);
@@ -554,18 +572,6 @@ static void arm64_jit_emit_helper_continue_packed1(struct arm64_jit_emitter *e, 
     arm64_jit_emit32(e, arm64_jit_enc_blr(16));
     arm64_jit_emit_helper_continue_check(e);
     arm64_jit_emit_epilogue(e);
-}
-
-static void arm64_jit_emit_helper_continue_spilled_packed1(struct arm64_jit_emitter *e,
-        void *helper, uint64_t x1_imm) {
-    arm64_jit_emit_spill_cached_state(e);
-    arm64_jit_emit_load_imm64(e, 1, x1_imm);
-    arm64_jit_emit32(e, arm64_jit_enc_mov_reg(0, 21));
-    arm64_jit_emit_load_imm64(e, 16, (uint64_t) helper);
-    arm64_jit_emit32(e, arm64_jit_enc_blr(16));
-    arm64_jit_emit_helper_continue_check(e);
-    arm64_jit_emit_epilogue(e);
-    arm64_jit_emit_load_cached_state(e);
 }
 
 static void arm64_jit_emit_helper_success_packed1(struct arm64_jit_emitter *e, void *helper,
@@ -1922,17 +1928,9 @@ enum arm64_jit_emit_result arm64_jit_emit_branch(struct arm64_jit_emitter *e, ui
             }
         }
         if (is_link) {
-            if (!arm64_jit_verify_mode()) {
-                arm64_jit_emit_set_guest_lr(e, guest_pc + 4);
-                uint64_t packed = ((uint64_t) target << 32) | (uint32_t) (guest_pc + 4);
-                arm64_jit_emit_helper_continue_spilled_packed1(e,
-                        arm64_jit_helper_call_direct_jitabi, packed);
-                return ARM64_JIT_EMIT_CONTINUE;
-            } else {
-                uint64_t packed = ((uint64_t) target << 32) | (uint32_t) guest_pc;
-                arm64_jit_emit_helper_return_packed1(e, arm64_jit_helper_branch_link_jitabi, packed);
-                return ARM64_JIT_EMIT_TERMINATE;
-            }
+            arm64_jit_emit_set_guest_lr(e, guest_pc + 4);
+            arm64_jit_emit_helper_return(e, arm64_jit_helper_dispatch_jitabi, target);
+            return ARM64_JIT_EMIT_TERMINATE;
         }
         arm64_jit_emit_helper_return(e, arm64_jit_helper_dispatch_jitabi, target);
         return ARM64_JIT_EMIT_TERMINATE;
@@ -1996,38 +1994,7 @@ enum arm64_jit_emit_result arm64_jit_emit_branch(struct arm64_jit_emitter *e, ui
         return ARM64_JIT_EMIT_TERMINATE;
     }
     if ((insn & 0xfe000000u) == 0xd6000000u) {
-        if (arm64_jit_branch_reg_fast_mode()) {
-            arm64_jit_emit_helper_return_branch_reg_fast(e, guest_pc, insn);
-            return ARM64_JIT_EMIT_TERMINATE;
-        }
-        uint32_t opc = (insn >> 21) & 0xf;
-        uint32_t rn = ARM64_RN(insn);
-        int host_rn = arm64_jit_guest_src_host_reg(e->block, rn, false);
-        if (!arm64_jit_local_fixup_disabled(e->block, guest_pc) &&
-                opc == 2 && host_rn >= 0) {
-            bool emitted_fast_path = false;
-            for (uint32_t i = 0; i < e->block->insn_count; i++) {
-                uint32_t caller_insn = e->block->insns[i];
-                if (((caller_insn >> 26) & 0x3f) != 0x25)
-                    continue;
-                addr_t caller_pc = e->block->insn_pcs[i];
-                addr_t return_pc = caller_pc + 4;
-                if (!arm64_jit_block_has_pc(e->block, return_pc))
-                    continue;
-                arm64_jit_emit_load_imm64(e, ARM64_JIT_HOST_HELPER0, return_pc);
-                arm64_jit_emit32(e, arm64_jit_enc_eor_reg64(ARM64_JIT_HOST_HELPER1,
-                        (unsigned) host_rn, ARM64_JIT_HOST_HELPER0));
-                if (arm64_jit_emit_local_fixup(e, guest_pc, return_pc, ARM64_JIT_FIXUP_CBZ)) {
-                    arm64_jit_emit32(e, arm64_jit_enc_cbz_cbnz(true, false, ARM64_JIT_HOST_HELPER1, 0));
-                    emitted_fast_path = true;
-                }
-            }
-            if (emitted_fast_path) {
-                arm64_jit_emit_helper_return_regarg(e, arm64_jit_helper_branch_reg_jitabi, guest_pc, insn);
-                return ARM64_JIT_EMIT_TERMINATE;
-            }
-        }
-        arm64_jit_emit_helper_return_regarg(e, arm64_jit_helper_branch_reg_jitabi, guest_pc, insn);
+        arm64_jit_emit_helper_return_branch_reg_fast(e, guest_pc, insn);
         return ARM64_JIT_EMIT_TERMINATE;
     }
     return ARM64_JIT_EMIT_UNSUPPORTED;
@@ -2581,12 +2548,14 @@ retry_without_local_fixups:
     };
     block->spill_state_fn = NULL;
     block->reload_state_fn = NULL;
+    block->light_spill_state_fn = NULL;
     block->pc_map_count = 0;
     block->verify_site_count = 0;
     block->fixup_count = 0;
     block->body_code_size = 0;
     block->spill_code_offset = UINT32_MAX;
     block->reload_code_offset = UINT32_MAX;
+    block->light_spill_code_offset = UINT32_MAX;
     block->entry_thunks_offset = UINT32_MAX;
     for (uint32_t i = 0; i < block->insn_count; i++) {
         block->insn_host_offsets[i] = UINT32_MAX;
@@ -2642,6 +2611,11 @@ retry_without_local_fixups:
     block->spill_code_offset = (uint32_t) e.size;
     block->spill_state_fn = buf + e.size;
     arm64_jit_emit_spill_cached_state(&e);
+    arm64_jit_emit_state_snippet_ret(&e);
+
+    block->light_spill_code_offset = (uint32_t) e.size;
+    block->light_spill_state_fn = buf + e.size;
+    arm64_jit_emit_light_spill_cached_state(&e);
     arm64_jit_emit_state_snippet_ret(&e);
 
     block->reload_code_offset = (uint32_t) e.size;

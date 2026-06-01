@@ -200,23 +200,10 @@ timeout 20s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_VERIFY=1 ISH_ARM64_JIT
 Do not leave trace enabled on broad benchmark runs unless the scope is tightly
 filtered.
 
-## Experimental Branch-Reg Fast Probe
+## Branch-Reg Fast Path
 
-`ISH_ARM64_JIT_BRANCH_REG_FAST=1` enables the experimental JIT-side
-branch-register resolver. It is intentionally opt-in and should not be treated
-as the default path until broader verifier coverage is clean.
-
-```bash
-timeout 10s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_BRANCH_REG_FAST=1 \
-  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /bin/echo hello \
-  > /private/tmp/branch_fast_echo.stdout 2> /private/tmp/branch_fast_echo.stderr
-```
-
-Extra fallback logging is separately gated by:
-
-```bash
-ISH_ARM64_JIT_BRANCH_REG_FAST_DEBUG=1
-```
+The JIT-side branch-register resolver is the default implementation for
+`BR`/`BLR`/`RET`. It is no longer opt-in.
 
 `ISH_ARM64_JIT_BRANCH_REG_TRACE=1` logs every runtime branch-register helper
 resolution, including the source PC, target, link registers, and JIT debug
@@ -228,11 +215,15 @@ timeout 20s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_BRANCH_REG_TRACE=1 \
   > /private/tmp/apk_branch_trace.stdout 2> /private/tmp/apk_branch_trace.stderr
 ```
 
-Important ABI lesson from the first probe: if an experimental JIT helper may
-fall back through a fragment spill snippet, it must restore all live JIT state
-that the spill snippet reads before calling the spill snippet. In practice that
-means restoring any touched cached-register host registers such as `x4` and
-restoring `NZCV` before fallback spill.
+The branch-reg resolver shape is:
+
+- same-fragment `BR`/`RET`: resolve target PC to current-fragment host offset
+  and branch directly with no spill
+- cross-fragment cache hit: restore touched live JIT state, call the source
+  fragment `light_spill_state_fn`, update runtime block/spill/reload/light-spill
+  fields, then enter the target fragment resolver
+- cache miss/failure: restore touched live JIT state, call the source fragment
+  full `spill_state_fn`, then fall back to the C branch-register helper
 
 ## Runtime Frontier Debugging
 
@@ -252,33 +243,15 @@ timeout 20s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_HANDOFF_AFTER_BLOCKS=2
 `ISH_ARM64_JIT_UNTIL_PC=0x...` hands off when dispatch reaches a specific guest
 PC. `ISH_ARM64_JIT_PROGRESS_INTERVAL=N` logs every `N` dispatched JIT blocks.
 
-## Direct-Call Debugging
+## Branch-Link Notes
 
-Direct fixed-target `BL` is currently emitted as a conservative nested JIT call
-in plain JIT mode. Verifier mode keeps the older terminate-to-runtime path so
-single-step comparison remains meaningful.
+Plain JIT and verifier mode should use the same instruction implementations;
+verifier mode should differ only by inserted verifier `brk` sites.
 
-Useful bounded profiling knobs:
-
-```bash
-timeout 15s env ISH_ARM64_BACKEND=arm64_jit \
-  ISH_ARM64_JIT_DIRECT_CALL_PROFILE=50000 \
-  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk stats \
-  > /private/tmp/apk_call_profile.stdout 2> /private/tmp/apk_call_profile.stderr
-```
-
-`ISH_ARM64_JIT_DIRECT_CALL_PROFILE=N` logs aggregate direct-call counts every
-`N` direct calls:
-
-- `returned`: callee returned to the expected guest LR, so caller reloaded and
-  continued in-fragment.
-- `nonreturn`: callee completed with `INT_NONE` but at a different PC, so the
-  caller exited to resume dispatch there.
-- `interrupt`: callee hit an interrupt boundary such as timer/syscall/fault.
-
-`ISH_ARM64_JIT_NESTED_NO_TIMER=1` is an opt-in probe that skips timer exits
-while inside nested direct-call execution. It is for diagnosis only; do not make
-it the default without revisiting scheduling/starvation behavior.
+Fixed-target `BL` currently sets guest `LR` to `guest_pc + 4`, then branches to
+the target. Same-fragment targets use local fixups. Cross-fragment targets exit
+to dispatch at the target, like other nonlocal control transfers. Do not
+reintroduce C-managed nested direct-call continuation semantics for `BL`.
 
 ## Dump Mode
 
@@ -408,25 +381,66 @@ Important invariants for future JIT-to-JIT transfer work:
 
 ### Fragment TLB Probe State
 
-`ISH_ARM64_JIT_FRAGMENT_TLB_FAST=1` currently enables fragment-TLB allocation,
-population, and runtime exposure to JIT helpers. The direct cross-fragment
-branch in `_arm64_jit_helper_branch_reg_fast_jitabi` is intentionally disabled
-behind an unconditional branch while the light JIT-to-JIT enter/exit ABI is
-unfinished.
+Fragment-TLB allocation, population, runtime exposure to JIT helpers, and
+cross-fragment branch-register handoff through
+`_arm64_jit_helper_branch_reg_fast_jitabi` are default-enabled.
+The helper handles:
 
-Important lesson from the first direct-handoff probe:
+- same-fragment `BR`/`RET` by branching directly to the current fragment body
+- cross-fragment `BR`/`BLR`/`RET` by probing the fragment TLB, light-spilling
+  source cached state, updating runtime block/spill/reload/light-spill state,
+  then entering the target fragment resolver
+- miss/failure by restoring touched JIT state, full-spilling source state, and
+  falling back to the normal C branch-register helper
 
-- A RET target can be a return into a caller frame that is currently suspended
-  inside the C-managed direct-call helper. Directly jumping to that caller
-  fragment creates another caller fragment frame instead of returning to the
-  suspended helper continuation.
-- Any future direct cross-fragment transfer must make fragment-boundary state
-  explicit: target block, target spill/reload snippets, target entry resolver,
-  and whether the source context is top-level dispatch or a nested helper
-  continuation.
-- The fragment-TLB entry currently stores page tag, valid range, target block,
-  target entry resolver, and target spill/reload snippets. The assembly probe
-  assumes the entry size is 64 bytes.
+Important lessons from the direct-handoff probe:
+
+- The target fragment entry resolver must index `insn_host_offsets[]` by the
+  matched instruction index. Accidentally indexing with the post-incremented
+  `insn_pcs` pointer produced a silent host-side hang after verifier step 2746
+  in `/bin/echo hello`.
+- The resolver fail path must publish `rt->resume_pc` and `cpu->pc` as the
+  requested target PC before returning `INT_NONE`; otherwise a failed resolver
+  can loop on stale dispatch state.
+- `BLR` must publish `cpu->regs[30] = guest_pc + 4` before target-fragment
+  reload. Same-fragment `BLR` is still routed through fallback unless the helper
+  can update a live cached LR register safely.
+- `arm64_jit_emit_spill_cached_state()` is a full architectural sync: cached
+  GPRs, guest SP, NZCV/FPCR/FPSR, and all 32 vector registers. It is not a
+  lightweight cached-register transfer primitive.
+- Do not overload `spill_state_fn` for light transfers. Existing helper/fault
+  paths depend on it being a full architectural spill. JIT-to-JIT cache hits use
+  the separate `light_spill_state_fn`, which publishes cached GPRs, guest SP,
+  and NZCV; it also publishes FPCR/FPSR and vector registers for fragments that
+  may dirty host FP/SIMD state.
+- The fragment-TLB entry stores page tag, valid range, target block, target
+  entry resolver, target spill/reload snippets, and target light-spill snippet.
+  The assembly probe assumes the entry size is 128 bytes.
+
+Branch-fast counters are included in helper profile output:
+
+```bash
+meson configure build-arm64-release -Darm64_jit_perf_counters=true
+ninja -C build-arm64-release
+timeout 30s env ISH_ARM64_BACKEND=arm64_jit \
+  ISH_ARM64_JIT_HELPER_PROFILE=1 ISH_ARM64_JIT_HELPER_PROFILE_INTERVAL=1 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /root/cbench_lite_arm64
+```
+
+The `branch_fast` line reports:
+
+- `same_fragment`: direct same-fragment `BR`/`RET` hits
+- `fragment_tlb`: fragment-TLB cross-fragment handoff hits
+- `misses`: fallback to the C branch-register helper
+
+These counters are useful for diagnosis but add writes on fast paths, so do not
+enable `arm64_jit_perf_counters` or use profile timings as benchmark timings
+for normal performance comparisons. Disable with:
+
+```bash
+meson configure build-arm64-release -Darm64_jit_perf_counters=false
+ninja -C build-arm64-release
+```
 
 ## Best Practices
 
