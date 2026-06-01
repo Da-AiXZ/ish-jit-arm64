@@ -143,6 +143,18 @@ timeout 30s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_VERIFY=1 \
   > /private/tmp/echo_verify.stdout 2> /private/tmp/echo_verify.stderr
 ```
 
+### Quiet verifier repro
+
+Use quiet verifier mode for long-running tests when step-by-step matched logs
+are too expensive and only mismatch/frontier output is needed.
+
+```bash
+timeout 30s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_VERIFY=1 \
+  ISH_ARM64_JIT_VERIFY_QUIET=1 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk update \
+  > /private/tmp/apk_update_verify.stdout 2> /private/tmp/apk_update_verify.stderr
+```
+
 ### Benchmark verifier repro
 
 ```bash
@@ -206,11 +218,67 @@ Extra fallback logging is separately gated by:
 ISH_ARM64_JIT_BRANCH_REG_FAST_DEBUG=1
 ```
 
+`ISH_ARM64_JIT_BRANCH_REG_TRACE=1` logs every runtime branch-register helper
+resolution, including the source PC, target, link registers, and JIT debug
+slots. This is very verbose; use it only with a narrow bounded repro.
+
+```bash
+timeout 20s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_BRANCH_REG_TRACE=1 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk stats \
+  > /private/tmp/apk_branch_trace.stdout 2> /private/tmp/apk_branch_trace.stderr
+```
+
 Important ABI lesson from the first probe: if an experimental JIT helper may
 fall back through a fragment spill snippet, it must restore all live JIT state
 that the spill snippet reads before calling the spill snippet. In practice that
 means restoring any touched cached-register host registers such as `x4` and
 restoring `NZCV` before fallback spill.
+
+## Runtime Frontier Debugging
+
+These knobs are for plain JIT debugging when verifier throughput is too low for
+the target. Always combine them with `timeout`.
+
+`ISH_ARM64_JIT_HANDOFF_AFTER_BLOCKS=N` runs the first `N` JIT block dispatches,
+then hands execution back to the threaded backend. It is useful for bisecting a
+plain-JIT-only behavioral difference.
+
+```bash
+timeout 20s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_HANDOFF_AFTER_BLOCKS=2267808 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk stats \
+  > /private/tmp/apk_handoff.stdout 2> /private/tmp/apk_handoff.stderr
+```
+
+`ISH_ARM64_JIT_UNTIL_PC=0x...` hands off when dispatch reaches a specific guest
+PC. `ISH_ARM64_JIT_PROGRESS_INTERVAL=N` logs every `N` dispatched JIT blocks.
+
+## Direct-Call Debugging
+
+Direct fixed-target `BL` is currently emitted as a conservative nested JIT call
+in plain JIT mode. Verifier mode keeps the older terminate-to-runtime path so
+single-step comparison remains meaningful.
+
+Useful bounded profiling knobs:
+
+```bash
+timeout 15s env ISH_ARM64_BACKEND=arm64_jit \
+  ISH_ARM64_JIT_DIRECT_CALL_PROFILE=50000 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk stats \
+  > /private/tmp/apk_call_profile.stdout 2> /private/tmp/apk_call_profile.stderr
+```
+
+`ISH_ARM64_JIT_DIRECT_CALL_PROFILE=N` logs aggregate direct-call counts every
+`N` direct calls:
+
+- `returned`: callee returned to the expected guest LR, so caller reloaded and
+  continued in-fragment.
+- `nonreturn`: callee completed with `INT_NONE` but at a different PC, so the
+  caller exited to resume dispatch there.
+- `interrupt`: callee hit an interrupt boundary such as timer/syscall/fault.
+
+`ISH_ARM64_JIT_NESTED_NO_TIMER=1` is an opt-in probe that skips timer exits
+while inside nested direct-call execution. It is for diagnosis only; do not make
+it the default without revisiting scheduling/starvation behavior.
 
 ## Dump Mode
 
@@ -333,6 +401,10 @@ Important invariants for future JIT-to-JIT transfer work:
 - Same-fragment jumps should use fragment-local guest PC to host offset mapping.
   Cross-fragment jumps must account for different cached-register maps before
   branching into the destination body.
+- Local backward/self branches are intentionally routed through the helper path
+  instead of staying inside one fragment. This provides a runtime safepoint for
+  timers, handoff debugging, and progress logging, and avoids unobservable
+  host-side infinite loops inside one compiled fragment.
 
 ## Best Practices
 

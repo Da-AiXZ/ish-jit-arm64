@@ -242,6 +242,7 @@ int arm64_jit_helper_timer(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_verify_trap(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_dispatch(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_branch_link(struct arm64_jit_runtime *rt, uint64_t packed);
+int arm64_jit_helper_call_direct(struct arm64_jit_runtime *rt, uint64_t packed);
 int arm64_jit_helper_branch_reg(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_branch_reg_fast_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc,
         uint32_t insn, uint64_t target);
@@ -274,6 +275,8 @@ int arm64_jit_helper_ldst_regoff(struct arm64_jit_runtime *rt, addr_t guest_pc,
         uint32_t insn);
 int arm64_jit_helper_ldst_regoff_live(struct arm64_jit_runtime *rt, uint64_t packed,
         uint64_t guest_addr, uint64_t value);
+int arm64_jit_helper_simd_ldst_regoff_live(struct arm64_jit_runtime *rt, uint64_t packed,
+        uint64_t guest_addr);
 int arm64_jit_helper_ldst_imm9_load_live(struct arm64_jit_runtime *rt, uint64_t packed,
         uint64_t guest_addr, uint64_t store_in_x1);
 int arm64_jit_helper_ldst_regoff_load_live(struct arm64_jit_runtime *rt, uint64_t packed,
@@ -292,6 +295,7 @@ int arm64_jit_helper_syscall_jitabi(struct arm64_jit_runtime *rt, addr_t guest_p
 int arm64_jit_helper_verify_trap_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_dispatch_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_branch_link_jitabi(struct arm64_jit_runtime *rt, uint64_t packed);
+int arm64_jit_helper_call_direct_jitabi(struct arm64_jit_runtime *rt, uint64_t packed);
 int arm64_jit_helper_branch_reg_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_cbz_cbnz_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_b_cond_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
@@ -330,6 +334,8 @@ int arm64_jit_helper_ldst_excl_jitabi(struct arm64_jit_runtime *rt, addr_t guest
         uint32_t insn);
 int arm64_jit_c_simd_ldst_imm_unsigned(struct arm64_jit_runtime *rt, addr_t guest_pc,
         uint32_t insn);
+int arm64_jit_c_simd_ldst_addr(struct arm64_jit_runtime *rt, uint64_t packed,
+        uint64_t guest_addr);
 int arm64_jit_c_simd_ldst_multi(struct arm64_jit_runtime *rt, addr_t guest_pc,
         uint32_t insn);
 int arm64_jit_c_ldst_imm9(struct arm64_jit_runtime *rt, addr_t guest_pc,

@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 #include "asbestos/asbestos.h"
 #include "asbestos/gen.h"
@@ -132,7 +133,10 @@ __attribute__((aligned(64))) uint64_t g_profile_idx = 0;
 #endif
 
 void jit_trace_regs(struct cpu_state *cpu) { (void)cpu; }
-void c_watch_write_hit(addr_t addr, const char *caller) { (void)addr; (void)caller; }
+void c_watch_write_hit(addr_t addr, const char *caller) {
+    (void) addr;
+    (void) caller;
+}
 void jit_watch_write_hit(struct cpu_state *cpu, addr_t store_addr, unsigned long *code_ptr) {
     (void)cpu; (void)store_addr; (void)code_ptr;
 }
@@ -619,7 +623,12 @@ int cpu_run_to_interrupt_threaded(struct cpu_state *cpu, struct tlb *tlb) {
     struct asbestos *asbestos = cpu->mmu->asbestos;
     __atomic_add_fetch(&asbestos->active_threads, 1, __ATOMIC_RELAXED);
     tlb_refresh(tlb, cpu->mmu);
-    int interrupt = (CPU_HAS_SINGLE_STEP ? cpu_single_step : cpu_step_to_interrupt)(cpu, tlb);
+    static int force_single_step = -1;
+    if (force_single_step == -1) {
+        const char *env = getenv("ISH_ARM64_THREADED_SINGLE_STEP");
+        force_single_step = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+    int interrupt = ((CPU_HAS_SINGLE_STEP || force_single_step) ? cpu_single_step : cpu_step_to_interrupt)(cpu, tlb);
     cpu->trapno = interrupt;
     __atomic_sub_fetch(&asbestos->active_threads, 1, __ATOMIC_RELAXED);
 
