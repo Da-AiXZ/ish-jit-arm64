@@ -49,10 +49,12 @@
 //   - The shared page helper always returns host_page_base, never data_minus_addr.
 //   - Callers derive host_ptr as host_page_base + (guest_addr & 0xfff).
 //
-// For now the JITABI wrappers tail into existing C semantic helpers while
-// preserving the tighter JIT-private register contract. This gives the JIT a
-// stable helper ABI now, and later the same entry points can inline more logic
-// without changing the emitter.
+// For now the JITABI C-helper wrappers tail into existing C semantic helpers
+// while preserving the tighter JIT-private register contract. Normal wrappers
+// return the helper interrupt to emitted code. Success wrappers keep success
+// inside the fragment and use the fragment epilogue only for non-success exits.
+// This gives the JIT a stable helper ABI now, and later the same entry points
+// can inline more logic without changing the emitter.
 
 // Offsets used below:
 // arm64_jit_runtime:
@@ -273,7 +275,7 @@
 .Ljit_simd_sync_done_\@:
 .endm
 
-.macro JITABI_WRAP1 name, target
+.macro JITABI_C_HELPER_WRAP1 name, target
 .globl \name
 \name:
     stp x29, x30, [sp, #-64]!
@@ -302,7 +304,7 @@
     ret
 .endm
 
-.macro JITABI_WRAP2 name, target
+.macro JITABI_C_HELPER_WRAP2 name, target
 .globl \name
 \name:
     stp x29, x30, [sp, #-64]!
@@ -332,7 +334,7 @@
     ret
 .endm
 
-.macro JITABI_WRAP3 name, target
+.macro JITABI_C_HELPER_WRAP3 name, target
 .globl \name
 \name:
     stp x29, x30, [sp, #-64]!
@@ -362,7 +364,7 @@
     ret
 .endm
 
-.macro JITABI_WRAP1_SUCCESS name, target
+.macro JITABI_C_HELPER_SUCCESS_WRAP1 name, target
 .globl \name
 \name:
     stp x29, x30, [sp, #-64]!
@@ -395,7 +397,7 @@
     JIT_FRAGMENT_EPILOGUE_AND_RET
 .endm
 
-.macro JITABI_WRAP2_SUCCESS name, target
+.macro JITABI_C_HELPER_SUCCESS_WRAP2 name, target
 .globl \name
 \name:
     stp x29, x30, [sp, #-64]!
@@ -429,7 +431,7 @@
     JIT_FRAGMENT_EPILOGUE_AND_RET
 .endm
 
-.macro JITABI_WRAP3_SUCCESS name, target
+.macro JITABI_C_HELPER_SUCCESS_WRAP3 name, target
 .globl \name
 \name:
     stp x29, x30, [sp, #-64]!
@@ -3854,9 +3856,9 @@ _arm64_jit_helper_ldst_pair_vec_live:
     ldp x29, x30, [sp], #128
     JIT_FRAGMENT_EPILOGUE_AND_RET
 
-JITABI_WRAP1 _arm64_jit_helper_unsupported_jitabi, _arm64_jit_helper_unsupported
-JITABI_WRAP1 _arm64_jit_helper_syscall_jitabi, _arm64_jit_helper_syscall
-JITABI_WRAP1 _arm64_jit_helper_timer_jitabi, _arm64_jit_helper_timer
+JITABI_C_HELPER_WRAP1 _arm64_jit_helper_unsupported_jitabi, _arm64_jit_helper_unsupported
+JITABI_C_HELPER_WRAP1 _arm64_jit_helper_syscall_jitabi, _arm64_jit_helper_syscall
+JITABI_C_HELPER_WRAP1 _arm64_jit_helper_timer_jitabi, _arm64_jit_helper_timer
 .globl _arm64_jit_helper_verify_trap_jitabi
 _arm64_jit_helper_verify_trap_jitabi:
     stp x29, x30, [sp, #-48]!
@@ -3872,21 +3874,21 @@ _arm64_jit_helper_verify_trap_jitabi:
     ldp x16, x17, [sp, #16]
     ldp x29, x30, [sp], #48
     ret
-JITABI_WRAP1 _arm64_jit_helper_dispatch_jitabi, _arm64_jit_helper_dispatch
-JITABI_WRAP2 _arm64_jit_helper_mrs_sysreg_jitabi, _arm64_jit_helper_mrs_sysreg
-JITABI_WRAP2 _arm64_jit_helper_ldr_imm_unsigned_jitabi, _arm64_jit_helper_ldr_imm_unsigned
-JITABI_WRAP1 _arm64_jit_helper_str_imm_unsigned_jitabi, _arm64_jit_helper_str_imm_unsigned
-JITABI_WRAP2 _arm64_jit_helper_mrs_tpidr_jitabi, _arm64_jit_helper_mrs_tpidr
-JITABI_WRAP2 _arm64_jit_helper_msr_tpidr_jitabi, _arm64_jit_helper_msr_tpidr
-JITABI_WRAP2 _arm64_jit_helper_msr_daif_jitabi, _arm64_jit_helper_msr_daif
-JITABI_WRAP2 _arm64_jit_helper_exec_dp_imm_jitabi, _arm64_jit_helper_exec_dp_imm
-JITABI_WRAP2 _arm64_jit_helper_exec_dp_reg_jitabi, _arm64_jit_helper_exec_dp_reg
-JITABI_WRAP2 _arm64_jit_helper_ldst_excl_jitabi, _arm64_jit_c_ldst_excl
-JITABI_WRAP2_SUCCESS _arm64_jit_helper_ldst_excl_success_jitabi, _arm64_jit_c_ldst_excl
-JITABI_WRAP2 _arm64_jit_helper_cbz_cbnz_jitabi, _arm64_jit_helper_cbz_cbnz
-JITABI_WRAP2 _arm64_jit_helper_b_cond_jitabi, _arm64_jit_helper_b_cond
-JITABI_WRAP2 _arm64_jit_helper_tbz_tbnz_jitabi, _arm64_jit_helper_tbz_tbnz
-JITABI_WRAP2 _arm64_jit_helper_branch_reg_jitabi, _arm64_jit_helper_branch_reg
+JITABI_C_HELPER_WRAP1 _arm64_jit_helper_dispatch_jitabi, _arm64_jit_helper_dispatch
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_mrs_sysreg_jitabi, _arm64_jit_helper_mrs_sysreg
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_ldr_imm_unsigned_jitabi, _arm64_jit_helper_ldr_imm_unsigned
+JITABI_C_HELPER_WRAP1 _arm64_jit_helper_str_imm_unsigned_jitabi, _arm64_jit_helper_str_imm_unsigned
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_mrs_tpidr_jitabi, _arm64_jit_helper_mrs_tpidr
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_msr_tpidr_jitabi, _arm64_jit_helper_msr_tpidr
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_msr_daif_jitabi, _arm64_jit_helper_msr_daif
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_exec_dp_imm_jitabi, _arm64_jit_helper_exec_dp_imm
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_exec_dp_reg_jitabi, _arm64_jit_helper_exec_dp_reg
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_ldst_excl_jitabi, _arm64_jit_c_ldst_excl
+JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_ldst_excl_success_jitabi, _arm64_jit_c_ldst_excl
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_cbz_cbnz_jitabi, _arm64_jit_helper_cbz_cbnz
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_b_cond_jitabi, _arm64_jit_helper_b_cond
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_tbz_tbnz_jitabi, _arm64_jit_helper_tbz_tbnz
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_branch_reg_jitabi, _arm64_jit_helper_branch_reg
 .globl _arm64_jit_helper_branch_reg_fast_jitabi
 _arm64_jit_helper_branch_reg_fast_jitabi:
     stp x29, x30, [sp, #-128]!
@@ -3896,17 +3898,17 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
     str x4, [sp, #64]
 
     // Branch-reg resolver. Same-fragment BR/RET jumps directly. BLR uses the
-    // fragment-entry path because LR may be cached in a fragment-private host
-    // register. Cross-fragment cache hits publish source cached state through
-    // the light spill snippet before entering the target. Misses full-spill and
-    // fall back to the C helper.
+    // fragment-entry path because publishing LR into arbitrary live cached
+    // state still needs a dedicated ABI path. Cross-fragment cache hits publish
+    // source cached state through the light spill snippet before entering the
+    // target. Misses full-spill and fall back to the C helper.
     mrs x4, nzcv
     str x4, [sp, #72]
     ubfx x4, x2, #21, #4        // branch-register opc
     cmp x4, #2                  // BR=0, BLR=1, RET=2
     b.hi 2f
     cmp x4, #1
-    b.eq 5f                     // BLR needs LR publication before reentry.
+    b.eq 5f
     ldr x16, [x0, #16]          // rt->block
     cbz x16, 2f
     ldr x17, [x16]              // block->start_pc
@@ -3917,18 +3919,12 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
     b.hs 5f
     tst x3, #3
     b.ne 2f
+    ldr x17, [x16]              // block->start_pc
+    sub x4, x3, x17
+    lsr x4, x4, #2              // contiguous instruction index
     ldr w17, [x16, #24]         // block->insn_count
-    add x4, x16, #32            // block->insn_pcs
-0:
-    cbz x17, 2f
-    ldr x30, [x4], #8
-    eor x30, x30, x3
-    cbz x30, 1f
-    sub x17, x17, #1
-    b 0b
-1:
-    ldr w30, [x16, #24]         // block->insn_count
-    sub x4, x30, x17            // matched index
+    cmp x4, x17
+    b.hs 2f
     mov x17, #0x9164            // block->insn_host_offsets
     add x17, x16, x17
     ldr w17, [x17, x4, lsl #2]
@@ -4054,16 +4050,16 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
     ldp x29, x30, [sp], #128
     ret
 
-JITABI_WRAP2 _arm64_jit_helper_ldst_imm9_jitabi, _arm64_jit_helper_ldst_imm9
-JITABI_WRAP2_SUCCESS _arm64_jit_helper_ldst_imm9_success_jitabi, _arm64_jit_helper_ldst_imm9
-JITABI_WRAP2 _arm64_jit_helper_ldst_regoff_jitabi, _arm64_jit_helper_ldst_regoff
-JITABI_WRAP2_SUCCESS _arm64_jit_helper_ldst_regoff_success_jitabi, _arm64_jit_helper_ldst_regoff
-JITABI_WRAP2 _arm64_jit_helper_ldst_pair_jitabi, _arm64_jit_helper_ldst_pair
-JITABI_WRAP2_SUCCESS _arm64_jit_helper_ldst_pair_success_jitabi, _arm64_jit_helper_ldst_pair
-JITABI_WRAP2 _arm64_jit_helper_simd_ldst_imm_unsigned_jitabi, _arm64_jit_helper_simd_ldst_imm_unsigned
-JITABI_WRAP2_SUCCESS _arm64_jit_helper_simd_ldst_multi_success_jitabi, _arm64_jit_c_simd_ldst_multi
-JITABI_WRAP2_SUCCESS _arm64_jit_helper_simd_ldst_imm_unsigned_success_jitabi, _arm64_jit_helper_simd_ldst_imm_unsigned
-JITABI_WRAP2_SUCCESS _arm64_jit_helper_ldr_imm_unsigned_success_jitabi, _arm64_jit_helper_ldr_imm_unsigned
-JITABI_WRAP1_SUCCESS _arm64_jit_helper_str_imm_unsigned_success_jitabi, _arm64_jit_helper_str_imm_unsigned
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_ldst_imm9_jitabi, _arm64_jit_helper_ldst_imm9
+JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_ldst_imm9_success_jitabi, _arm64_jit_helper_ldst_imm9
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_ldst_regoff_jitabi, _arm64_jit_helper_ldst_regoff
+JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_ldst_regoff_success_jitabi, _arm64_jit_helper_ldst_regoff
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_ldst_pair_jitabi, _arm64_jit_helper_ldst_pair
+JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_ldst_pair_success_jitabi, _arm64_jit_helper_ldst_pair
+JITABI_C_HELPER_WRAP2 _arm64_jit_helper_simd_ldst_imm_unsigned_jitabi, _arm64_jit_helper_simd_ldst_imm_unsigned
+JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_simd_ldst_multi_success_jitabi, _arm64_jit_c_simd_ldst_multi
+JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_simd_ldst_imm_unsigned_success_jitabi, _arm64_jit_helper_simd_ldst_imm_unsigned
+JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_ldr_imm_unsigned_success_jitabi, _arm64_jit_helper_ldr_imm_unsigned
+JITABI_C_HELPER_SUCCESS_WRAP1 _arm64_jit_helper_str_imm_unsigned_success_jitabi, _arm64_jit_helper_str_imm_unsigned
 
 #endif

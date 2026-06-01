@@ -371,6 +371,10 @@ Important invariants for future JIT-to-JIT transfer work:
 - Guest page invalidation marks affected blocks jetsam and increments
   `invalidate_gen`; fast caches must either check that generation or be cleared
   under the same invalidation path.
+- Superseding an older contained block also bumps `invalidate_gen`, because the
+  JIT-side fragment TLB only has the generation guard and cannot cheaply test
+  `block->is_jetsam` before jumping.
+- Page-list membership uses `end_pc - 1` because fragment `end_pc` is exclusive.
 - Same-fragment jumps should use fragment-local guest PC to host offset mapping.
   Cross-fragment jumps must account for different cached-register maps before
   branching into the destination body.
@@ -386,7 +390,9 @@ cross-fragment branch-register handoff through
 `_arm64_jit_helper_branch_reg_fast_jitabi` are default-enabled.
 The helper handles:
 
-- same-fragment `BR`/`RET` by branching directly to the current fragment body
+- same-fragment `BR`/`RET` by branching directly to the current fragment body.
+  Same-fragment `BLR` is still routed through the fragment-entry path until LR
+  publication has a safe dedicated ABI.
 - cross-fragment `BR`/`BLR`/`RET` by probing the fragment TLB, light-spilling
   source cached state, updating runtime block/spill/reload/light-spill state,
   then entering the target fragment resolver
@@ -395,10 +401,22 @@ The helper handles:
 
 Important lessons from the direct-handoff probe:
 
-- The target fragment entry resolver must index `insn_host_offsets[]` by the
-  matched instruction index. Accidentally indexing with the post-incremented
-  `insn_pcs` pointer produced a silent host-side hang after verifier step 2746
-  in `/bin/echo hello`.
+- Fragments are expected to be contiguous 4-byte guest instruction ranges. The
+  target fragment entry resolver relies on that invariant and computes
+  `index = (target_pc - block->start_pc) >> 2` before indexing
+  `insn_host_offsets[]`. Do not switch this to a linear `insn_pcs[]` search
+  unless fragment layout becomes non-contiguous.
+- The same-fragment branch-register fast helper uses the same contiguous
+  fragment invariant for O(1) target lookup. Keep it aligned with the entry
+  resolver if the fragment layout invariant changes.
+- C-side runtime fallback lookup also uses the contiguous fragment invariant in
+  `arm64_jit_find_insn_index()`. Per-page block-list scans remain acceptable as
+  a slow fallback because code pages should have only a small number of
+  fragments.
+- A naive same-fragment `BLR` helper-local LR publication attempt made
+  `/sbin/apk stats` exit successfully with empty stdout. Do not reintroduce that
+  shape; it needs a dedicated ABI that can update live cached LR without
+  clobbering other cached guest registers.
 - The resolver fail path must publish `rt->resume_pc` and `cpu->pc` as the
   requested target PC before returning `INT_NONE`; otherwise a failed resolver
   can loop on stale dispatch state.

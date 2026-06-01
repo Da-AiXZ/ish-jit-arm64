@@ -3077,11 +3077,12 @@ static struct arm64_jit_entrypoint *arm64_jit_lookup_entry(struct arm64_jit_stat
 }
 
 static int arm64_jit_find_insn_index(const struct arm64_jit_block *block, addr_t pc) {
-    for (uint32_t i = 0; i < block->insn_count; i++) {
-        if (block->insn_pcs[i] == pc)
-            return (int) i;
-    }
-    return -1;
+    if (block == NULL || pc < block->start_pc || pc >= block->end_pc || (pc & 3) != 0)
+        return -1;
+    uint64_t index = (pc - block->start_pc) >> 2;
+    if (index >= block->insn_count || block->insn_pcs[index] != pc)
+        return -1;
+    return (int) index;
 }
 
 static bool arm64_jit_block_entry_valid(const struct arm64_jit_block *block, addr_t pc,
@@ -3227,6 +3228,7 @@ static void arm64_jit_discard_block(struct arm64_jit_block *block) {
 
 static void arm64_jit_supersede_contained_blocks(struct arm64_jit_state *state,
         struct arm64_jit_block *block) {
+    bool invalidated = false;
     for (size_t b = 0; b < state->hash_size; b++) {
         struct list *bucket = &state->hash[b];
         struct arm64_jit_block *other, *tmp;
@@ -3262,16 +3264,20 @@ static void arm64_jit_supersede_contained_blocks(struct arm64_jit_state *state,
             arm64_jit_disconnect(other);
             other->is_jetsam = true;
             list_add(&state->jetsam, &other->jetsam);
+            invalidated = true;
         }
     }
+    if (invalidated)
+        state->invalidate_gen++;
 }
 
 static void arm64_jit_insert(struct arm64_jit_state *state, struct arm64_jit_block *block) {
     list_init(&block->entrypoints);
     list_init_add(&state->hash[block->start_pc % state->hash_size], &block->hash_chain);
     list_init_add(arm64_jit_blocks_list(state, PAGE(block->start_pc), 0), &block->page[0]);
-    if (PAGE(block->start_pc) != PAGE(block->end_pc))
-        list_init_add(arm64_jit_blocks_list(state, PAGE(block->end_pc), 1), &block->page[1]);
+    if (block->end_pc != 0 &&
+            PAGE(block->start_pc) != PAGE(block->end_pc - 1))
+        list_init_add(arm64_jit_blocks_list(state, PAGE(block->end_pc - 1), 1), &block->page[1]);
     for (uint32_t i = 1; i < block->insn_count; i++) {
         if (block->entry_code[i] == NULL || block->insn_host_offsets[i] == UINT32_MAX)
             continue;
