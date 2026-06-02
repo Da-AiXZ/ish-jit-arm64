@@ -23,6 +23,8 @@ _Static_assert(sizeof(struct arm64_jit_fragment_tlb_entry) == 128,
         "arm64_jit_fragment_tlb_entry must stay 128 bytes for helpers.S indexing");
 _Static_assert(offsetof(struct arm64_jit_fragment_tlb_entry, light_spill_state_fn) == 64,
         "helpers.S assumes fragment_tlb_entry.light_spill_state_fn offset");
+_Static_assert(offsetof(struct arm64_jit_fragment_tlb_entry, insert_serial) == 72,
+        "helpers.S assumes fragment_tlb_entry.insert_serial offset");
 _Static_assert(offsetof(struct arm64_jit_runtime, light_spill_state_fn) == 128,
         "helpers.S assumes arm64_jit_runtime.light_spill_state_fn offset");
 
@@ -84,6 +86,8 @@ static struct arm64_jit_helper_profile g_arm64_jit_helper_profile;
 
 static int arm64_jit_helper_profile_mode(void);
 static void arm64_jit_dump_helper_profile(void);
+static int arm64_jit_fragment_page_profile_mode(void);
+static void arm64_jit_dump_fragment_page_profile(void);
 
 static uint64_t arm64_jit_now_ms(void) {
     struct timespec ts;
@@ -161,6 +165,7 @@ static void arm64_jit_disconnect(struct arm64_jit_block *block);
 static void arm64_jit_remove_entrypoints(struct arm64_jit_block *block);
 static struct arm64_jit_block *arm64_jit_compile_block(addr_t start_pc, struct tlb *tlb,
         struct arm64_jit_state *state);
+static bool arm64_jit_direct_branch_target(uint32_t insn, addr_t guest_pc, addr_t *target_out);
 static int arm64_jit_run_block_from_index(struct arm64_jit_block *block, uint32_t entry_index,
         struct cpu_state *cpu, struct tlb *tlb);
 
@@ -180,6 +185,38 @@ static int arm64_jit_tlb_profile_mode(void) {
         profile_mode = (env != NULL && env[0] == '1') ? 1 : 0;
     }
     return profile_mode;
+}
+
+static int arm64_jit_fragment_page_profile_mode(void) {
+    static int profile_mode = -1;
+    if (profile_mode == -1) {
+        const char *env = getenv("ISH_ARM64_JIT_FRAGMENT_PAGE_PROFILE");
+        profile_mode = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+    return profile_mode;
+}
+
+static uint64_t arm64_jit_fragment_page_profile_interval(void) {
+    static bool inited;
+    static uint64_t interval;
+    if (!inited) {
+        const char *env = getenv("ISH_ARM64_JIT_FRAGMENT_PAGE_PROFILE_INTERVAL");
+        interval = (env != NULL && env[0] != '\0') ? strtoull(env, NULL, 0) : 1000000ull;
+        inited = true;
+    }
+    return interval;
+}
+
+static addr_t arm64_jit_fragment_page_detail(void) {
+    static bool inited;
+    static addr_t page;
+    if (!inited) {
+        const char *env = getenv("ISH_ARM64_JIT_FRAGMENT_PAGE_DETAIL");
+        if (env != NULL && env[0] != '\0')
+            page = (addr_t) strtoull(env, NULL, 0) & ~(addr_t) (PAGE_SIZE - 1);
+        inited = true;
+    }
+    return page;
 }
 
 void arm64_jit_dump_tlb_profile(void) {
@@ -336,7 +373,8 @@ static struct arm64_jit_state *arm64_jit_state_new(struct mmu *mmu) {
     state->entry_cache_size = ARM64_JIT_ENTRY_CACHE_SIZE;
     state->entry_cache = calloc(state->entry_cache_size, sizeof(*state->entry_cache));
     state->fragment_tlb_size = ARM64_JIT_FRAGMENT_TLB_SIZE;
-    state->fragment_tlb = calloc(state->fragment_tlb_size, sizeof(*state->fragment_tlb));
+    state->fragment_tlb = calloc(state->fragment_tlb_size * ARM64_JIT_FRAGMENT_TLB_WAYS,
+            sizeof(*state->fragment_tlb));
     state->page_hash = calloc(ARM64_JIT_PAGE_HASH_SIZE, sizeof(*state->page_hash));
     if (state->hash == NULL || state->entry_hash == NULL ||
             state->entry_cache == NULL || state->fragment_tlb == NULL ||
@@ -361,6 +399,11 @@ static struct arm64_jit_state *arm64_jit_state_new(struct mmu *mmu) {
     if (!helper_profile_atexit_installed && arm64_jit_helper_profile_mode()) {
         atexit(arm64_jit_dump_helper_profile);
         helper_profile_atexit_installed = true;
+    }
+    static bool fragment_page_profile_atexit_installed;
+    if (!fragment_page_profile_atexit_installed && arm64_jit_fragment_page_profile_mode()) {
+        atexit(arm64_jit_dump_fragment_page_profile);
+        fragment_page_profile_atexit_installed = true;
     }
     return state;
 }
@@ -414,6 +457,12 @@ int arm64_jit_branch_reg_fast_mode(void) {
 static int arm64_jit_fragment_tlb_fast_mode(void) {
     return 1;
 }
+
+#ifdef ISH_ARM64_JIT_PERF_COUNTERS
+static unsigned arm64_jit_fragment_tlb_miss_reason(
+        const struct arm64_jit_fragment_tlb_entry *base, size_t ways,
+        unsigned invalidate_gen, addr_t pc);
+#endif
 
 static int arm64_jit_branch_reg_trace_mode(void) {
     static int trace_mode = -1;
@@ -544,6 +593,7 @@ static uint64_t arm64_jit_helper_profile_interval(void) {
 }
 
 static void arm64_jit_dump_helper_profile(void) {
+    arm64_jit_dump_fragment_page_profile();
     if (!arm64_jit_helper_profile_mode())
         return;
     uint64_t dispatch_blocks = atomic_load_explicit(
@@ -629,7 +679,295 @@ static void arm64_jit_dump_helper_profile(void) {
                     &g_arm64_jit_branch_fast_profile.fragment_tlb_hits, memory_order_relaxed),
             (unsigned long long) atomic_load_explicit(
                     &g_arm64_jit_branch_fast_profile.misses, memory_order_relaxed));
+    fprintf(stderr,
+            "[arm64-jit-helper-profile] branch_fast_miss_reason empty=%llu generation=%llu page_collision=%llu "
+            "same_page_range=%llu invalid_entry=%llu other=%llu\n",
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.miss_reasons[0], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.miss_reasons[1], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.miss_reasons[2], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.miss_reasons[3], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.miss_reasons[4], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.miss_reasons[5], memory_order_relaxed));
+    fprintf(stderr,
+            "[arm64-jit-helper-profile] control_fast "
+            "dispatch=%llu/%llu/%llu b_cond=%llu/%llu/%llu "
+            "cbz=%llu/%llu/%llu tbz=%llu/%llu/%llu\n",
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_same_fragment_hits[0], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_fragment_tlb_hits[0], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_misses[0], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_same_fragment_hits[1], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_fragment_tlb_hits[1], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_misses[1], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_same_fragment_hits[2], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_fragment_tlb_hits[2], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_misses[2], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_same_fragment_hits[3], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_fragment_tlb_hits[3], memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_branch_fast_profile.control_misses[3], memory_order_relaxed));
+    for (int i = 0; i < 4; i++) {
+        fprintf(stderr,
+                "[arm64-jit-helper-profile] control_fast_miss_reason kind=%d empty=%llu generation=%llu "
+                "page_collision=%llu same_page_range=%llu invalid_entry=%llu other=%llu\n",
+                i,
+                (unsigned long long) atomic_load_explicit(
+                        &g_arm64_jit_branch_fast_profile.control_miss_reasons[i][0], memory_order_relaxed),
+                (unsigned long long) atomic_load_explicit(
+                        &g_arm64_jit_branch_fast_profile.control_miss_reasons[i][1], memory_order_relaxed),
+                (unsigned long long) atomic_load_explicit(
+                        &g_arm64_jit_branch_fast_profile.control_miss_reasons[i][2], memory_order_relaxed),
+                (unsigned long long) atomic_load_explicit(
+                        &g_arm64_jit_branch_fast_profile.control_miss_reasons[i][3], memory_order_relaxed),
+                (unsigned long long) atomic_load_explicit(
+                        &g_arm64_jit_branch_fast_profile.control_miss_reasons[i][4], memory_order_relaxed),
+                (unsigned long long) atomic_load_explicit(
+                        &g_arm64_jit_branch_fast_profile.control_miss_reasons[i][5], memory_order_relaxed));
+    }
 #endif
+}
+
+struct arm64_jit_page_fragment_stat {
+    addr_t page_start;
+    uint32_t fragments;
+    uint32_t insns;
+    addr_t min_start;
+    addr_t max_end;
+};
+
+static int arm64_jit_cmp_page_fragment_count(const void *a, const void *b) {
+    const struct arm64_jit_page_fragment_stat *pa = a;
+    const struct arm64_jit_page_fragment_stat *pb = b;
+    if (pa->fragments != pb->fragments)
+        return pa->fragments < pb->fragments ? -1 : 1;
+    if (pa->page_start == pb->page_start)
+        return 0;
+    return pa->page_start < pb->page_start ? -1 : 1;
+}
+
+static int arm64_jit_cmp_page_fragment_count_desc(const void *a, const void *b) {
+    return -arm64_jit_cmp_page_fragment_count(a, b);
+}
+
+static const char *arm64_jit_insn_kind_name(enum arm64_insn_type type) {
+    switch (type) {
+        case INSN_DP_IMM: return "dp_imm";
+        case INSN_DP_REG: return "dp_reg";
+        case INSN_BRANCH: return "branch";
+        case INSN_EXCEPTION: return "exception";
+        case INSN_SYSTEM: return "system";
+        case INSN_LD_ST: return "ldst";
+        case INSN_SIMD_FP: return "simd_fp";
+        default: return "unknown";
+    }
+}
+
+static const char *arm64_jit_branch_kind_name(uint32_t insn) {
+    uint32_t op = (insn >> 26) & 0x3f;
+    if (op == 0x05)
+        return "b";
+    if (op == 0x25)
+        return "bl";
+    if ((insn & 0xff000010u) == 0x54000000u)
+        return "b.cond";
+    if ((insn & 0x7e000000u) == 0x34000000u)
+        return ((insn >> 24) & 1) ? "cbnz" : "cbz";
+    if ((insn & 0x7e000000u) == 0x36000000u)
+        return ((insn >> 24) & 1) ? "tbnz" : "tbz";
+    if ((insn & 0xfffffc1fu) == 0xd61f0000u)
+        return "br";
+    if ((insn & 0xfffffc1fu) == 0xd63f0000u)
+        return "blr";
+    if ((insn & 0xfffffc1fu) == 0xd65f0000u)
+        return "ret";
+    return "branch";
+}
+
+static void arm64_jit_page_fragment_stat_add(struct arm64_jit_page_fragment_stat **stats,
+        size_t *count, size_t *cap, addr_t page_start, const struct arm64_jit_block *block) {
+    for (size_t i = 0; i < *count; i++) {
+        if ((*stats)[i].page_start == page_start) {
+            (*stats)[i].fragments++;
+            (*stats)[i].insns += block->insn_count;
+            if (block->start_pc < (*stats)[i].min_start)
+                (*stats)[i].min_start = block->start_pc;
+            if (block->end_pc > (*stats)[i].max_end)
+                (*stats)[i].max_end = block->end_pc;
+            return;
+        }
+    }
+    if (*count == *cap) {
+        size_t new_cap = *cap == 0 ? 64 : *cap * 2;
+        struct arm64_jit_page_fragment_stat *new_stats =
+                realloc(*stats, new_cap * sizeof(*new_stats));
+        if (new_stats == NULL)
+            return;
+        *stats = new_stats;
+        *cap = new_cap;
+    }
+    (*stats)[*count] = (struct arm64_jit_page_fragment_stat) {
+        .page_start = page_start,
+        .fragments = 1,
+        .insns = block->insn_count,
+        .min_start = block->start_pc,
+        .max_end = block->end_pc,
+    };
+    (*count)++;
+}
+
+static void arm64_jit_dump_fragment_page_profile(void) {
+    if (!arm64_jit_fragment_page_profile_mode())
+        return;
+    uint64_t dispatch_blocks = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.dispatch_blocks, memory_order_relaxed);
+    uint64_t interval = arm64_jit_fragment_page_profile_interval();
+    uint64_t bucket = interval == 0 ? dispatch_blocks : dispatch_blocks / interval;
+    static _Atomic uint64_t last_bucket;
+    uint64_t old_bucket = atomic_load_explicit(&last_bucket, memory_order_relaxed);
+    if (bucket == old_bucket)
+        return;
+    if (!atomic_compare_exchange_strong_explicit(&last_bucket, &old_bucket, bucket,
+                memory_order_relaxed, memory_order_relaxed))
+        return;
+    struct arm64_jit_page_fragment_stat *stats = NULL;
+    size_t count = 0;
+    size_t cap = 0;
+    uint64_t live_blocks = 0;
+    uint64_t total_insns = 0;
+    addr_t detail_page = arm64_jit_fragment_page_detail();
+
+    lock(&g_arm64_jit_slots_lock);
+    for (size_t slot = 0; slot < sizeof(g_arm64_jit_slots) / sizeof(g_arm64_jit_slots[0]); slot++) {
+        struct arm64_jit_state *state = g_arm64_jit_slots[slot].state;
+        if (state == NULL)
+            continue;
+        lock(&state->lock);
+        for (size_t b = 0; b < state->hash_size; b++) {
+            struct list *bucket = &state->hash[b];
+            struct arm64_jit_block *block;
+            if (list_null(bucket))
+                continue;
+            list_for_each_entry(bucket, block, hash_chain) {
+                if (block->is_jetsam || block->code_rx == NULL || block->end_pc <= block->start_pc)
+                    continue;
+                live_blocks++;
+                total_insns += block->insn_count;
+                addr_t first_page = block->start_pc & ~(addr_t) (PAGE_SIZE - 1);
+                addr_t last_page = (block->end_pc - 1) & ~(addr_t) (PAGE_SIZE - 1);
+                for (addr_t page = first_page; page <= last_page; page += PAGE_SIZE)
+                    arm64_jit_page_fragment_stat_add(&stats, &count, &cap, page, block);
+                if (detail_page != 0 && detail_page >= first_page && detail_page <= last_page) {
+                    uint32_t last = block->insn_count - 1;
+                    const char *kind = arm64_jit_insn_kind_name(block->infos[last].type);
+                    const char *branch_kind = block->infos[last].type == INSN_BRANCH ?
+                            arm64_jit_branch_kind_name(block->insns[last]) : "";
+                    addr_t target = 0;
+                    bool has_target = block->infos[last].type == INSN_BRANCH &&
+                            arm64_jit_direct_branch_target(block->insns[last], block->insn_pcs[last], &target);
+                    uint32_t first_insn = block->insn_count > 0 ? block->insns[0] : 0;
+                    uint32_t second_insn = block->insn_count > 1 ? block->insns[1] : 0;
+                    uint32_t third_insn = block->insn_count > 2 ? block->insns[2] : 0;
+                    uint32_t fourth_insn = block->insn_count > 3 ? block->insns[3] : 0;
+                    fprintf(stderr,
+                            "[arm64-jit-fragment-page-detail] page=0x%llx block=0x%llx..0x%llx "
+                            "insns=%u first4=0x%08x,0x%08x,0x%08x,0x%08x "
+                            "last_pc=0x%llx last_insn=0x%08x kind=%s branch=%s "
+                            "target=%s0x%llx unsupported=%d term=%d\n",
+                            (unsigned long long) detail_page,
+                            (unsigned long long) block->start_pc,
+                            (unsigned long long) block->end_pc,
+                            block->insn_count,
+                            first_insn,
+                            second_insn,
+                            third_insn,
+                            fourth_insn,
+                            (unsigned long long) block->insn_pcs[last],
+                            block->insns[last],
+                            kind,
+                            branch_kind,
+                            has_target ? "" : "none:",
+                            (unsigned long long) (has_target ? target : 0),
+                            block->unsupported,
+                            block->terminal_interrupt);
+                }
+            }
+        }
+        unlock(&state->lock);
+    }
+    unlock(&g_arm64_jit_slots_lock);
+
+    if (count == 0) {
+        fprintf(stderr, "[arm64-jit-fragment-page-profile] pages=0 live_blocks=0\n");
+        free(stats);
+        return;
+    }
+
+    qsort(stats, count, sizeof(*stats), arm64_jit_cmp_page_fragment_count);
+    uint64_t total_fragments = 0;
+    uint64_t pages_gt1 = 0;
+    uint64_t pages_gt2 = 0;
+    uint64_t pages_gt4 = 0;
+    uint64_t pages_gt8 = 0;
+    for (size_t i = 0; i < count; i++) {
+        total_fragments += stats[i].fragments;
+        pages_gt1 += stats[i].fragments > 1;
+        pages_gt2 += stats[i].fragments > 2;
+        pages_gt4 += stats[i].fragments > 4;
+        pages_gt8 += stats[i].fragments > 8;
+    }
+    uint32_t min = stats[0].fragments;
+    uint32_t max = stats[count - 1].fragments;
+    uint32_t median = stats[count / 2].fragments;
+    uint32_t p90 = stats[(count * 90) / 100].fragments;
+    uint32_t p99 = stats[(count * 99) / 100].fragments;
+    double avg = (double) total_fragments / (double) count;
+    double avg_insns = live_blocks ? (double) total_insns / (double) live_blocks : 0.0;
+    fprintf(stderr,
+            "[arm64-jit-fragment-page-profile] pages=%zu live_blocks=%llu fragments=%llu "
+            "dispatch_blocks=%llu "
+            "fragments_per_page min=%u avg=%.2f median=%u p90=%u p99=%u max=%u "
+            "pages_gt1=%llu pages_gt2=%llu pages_gt4=%llu pages_gt8=%llu "
+            "avg_insns_per_block=%.2f\n",
+            count,
+            (unsigned long long) live_blocks,
+            (unsigned long long) total_fragments,
+            (unsigned long long) dispatch_blocks,
+            min, avg, median, p90, p99, max,
+            (unsigned long long) pages_gt1,
+            (unsigned long long) pages_gt2,
+            (unsigned long long) pages_gt4,
+            (unsigned long long) pages_gt8,
+            avg_insns);
+    qsort(stats, count, sizeof(*stats), arm64_jit_cmp_page_fragment_count_desc);
+    size_t top = count < 16 ? count : 16;
+    for (size_t i = 0; i < top; i++) {
+        fprintf(stderr,
+                "[arm64-jit-fragment-page-profile] top%zu page=0x%llx fragments=%u "
+                "insns=%u min_start=0x%llx max_end=0x%llx\n",
+                i + 1,
+                (unsigned long long) stats[i].page_start,
+                stats[i].fragments,
+                stats[i].insns,
+                (unsigned long long) stats[i].min_start,
+                (unsigned long long) stats[i].max_end);
+    }
+    free(stats);
 }
 
 static const struct arm64_jit_verify_site *arm64_jit_find_verify_site(
@@ -840,6 +1178,22 @@ int arm64_jit_helper_verify_trap(struct arm64_jit_runtime *rt, addr_t guest_pc) 
 int arm64_jit_helper_dispatch(struct arm64_jit_runtime *rt, addr_t guest_pc) {
     arm64_jit_profile_inc(&g_arm64_jit_helper_profile.control_total);
     arm64_jit_profile_inc(&g_arm64_jit_helper_profile.control_dispatch);
+#ifdef ISH_ARM64_JIT_PERF_COUNTERS
+    if (rt->fragment_tlb == NULL || rt->fragment_tlb_size == 0) {
+        atomic_fetch_add_explicit(
+                &g_arm64_jit_branch_fast_profile.control_miss_reasons[0][0],
+                1, memory_order_relaxed);
+    } else {
+        const struct arm64_jit_fragment_tlb_entry *set =
+                &rt->fragment_tlb[((size_t) guest_pc >> PAGE_BITS) %
+                rt->fragment_tlb_size * ARM64_JIT_FRAGMENT_TLB_WAYS];
+        unsigned reason = arm64_jit_fragment_tlb_miss_reason(set,
+                ARM64_JIT_FRAGMENT_TLB_WAYS, rt->invalidate_gen, guest_pc);
+        atomic_fetch_add_explicit(
+                &g_arm64_jit_branch_fast_profile.control_miss_reasons[0][reason],
+                1, memory_order_relaxed);
+    }
+#endif
     rt->resume_pc = guest_pc;
     rt->cpu->pc = guest_pc;
     rt->exit_interrupt = INT_NONE;
@@ -852,6 +1206,20 @@ int arm64_jit_helper_branch_reg(struct arm64_jit_runtime *rt, addr_t guest_pc, u
     uint32_t opc = (insn >> 21) & 0xf;
     uint32_t rn = ARM64_RN(insn);
     uint64_t target = arm64_jit_read_gpr(rt->cpu, rn, false) & 0xffffffffffffull;
+#ifdef ISH_ARM64_JIT_PERF_COUNTERS
+    if (rt->fragment_tlb == NULL || rt->fragment_tlb_size == 0) {
+        atomic_fetch_add_explicit(&g_arm64_jit_branch_fast_profile.miss_reasons[0],
+                1, memory_order_relaxed);
+    } else {
+        const struct arm64_jit_fragment_tlb_entry *set =
+                &rt->fragment_tlb[((size_t) target >> PAGE_BITS) %
+                rt->fragment_tlb_size * ARM64_JIT_FRAGMENT_TLB_WAYS];
+        unsigned reason = arm64_jit_fragment_tlb_miss_reason(set,
+                ARM64_JIT_FRAGMENT_TLB_WAYS, rt->invalidate_gen, target);
+        atomic_fetch_add_explicit(&g_arm64_jit_branch_fast_profile.miss_reasons[reason],
+                1, memory_order_relaxed);
+    }
+#endif
     if (arm64_jit_branch_reg_trace_mode()) {
         fprintf(stderr,
                 "[arm64-jit-branch-reg] pc=0x%llx opc=%u rn=%u target=0x%llx x16=0x%llx x17=0x%llx x30=0x%llx debug=0x%llx/0x%llx/0x%llx/0x%llx\n",
@@ -3143,6 +3511,37 @@ static struct arm64_jit_block *arm64_jit_lookup(struct arm64_jit_state *state, a
     return NULL;
 }
 
+static uint32_t arm64_jit_block_gpr_use_mask(const struct arm64_jit_block *block) {
+    uint32_t mask = 0;
+    if (block == NULL)
+        return mask;
+    for (uint32_t i = 0; i < block->insn_count; i++) {
+        const struct arm64_jit_insn_info *info = &block->infos[i];
+        for (uint32_t j = 0; j < info->gpr_use_count; j++) {
+            uint32_t reg = info->gpr_uses[j].reg;
+            if (reg < 31)
+                mask |= 1u << reg;
+        }
+    }
+    return mask;
+}
+
+static bool arm64_jit_can_merge_existing_block(addr_t start_pc, uint32_t used_gpr_mask,
+        const struct arm64_jit_block *existing, uint32_t *merged_gpr_mask_out) {
+    if (existing == NULL || existing->is_jetsam || existing->insn_count == 0 ||
+            existing->end_pc <= existing->start_pc)
+        return false;
+    uint64_t merged_insns = (existing->end_pc - start_pc) >> 2;
+    if (merged_insns == 0 || merged_insns > ARM64_JIT_MAX_INSNS)
+        return false;
+    uint32_t merged_mask = used_gpr_mask | arm64_jit_block_gpr_use_mask(existing);
+    if (__builtin_popcount(merged_mask) > ARM64_JIT_MAX_ALLOCATABLE_GPRS)
+        return false;
+    if (merged_gpr_mask_out != NULL)
+        *merged_gpr_mask_out = merged_mask;
+    return true;
+}
+
 static bool arm64_jit_is_likely_function_prologue(uint32_t insn0, uint32_t insn1) {
     // Canonical frame setup:
     //   stp x29, x30, [sp, #-imm]!
@@ -3244,6 +3643,43 @@ static size_t arm64_jit_fragment_tlb_index(const struct arm64_jit_state *state, 
     return ((size_t) pc >> 12) % state->fragment_tlb_size;
 }
 
+#ifdef ISH_ARM64_JIT_PERF_COUNTERS
+static unsigned arm64_jit_fragment_tlb_miss_reason(
+        const struct arm64_jit_fragment_tlb_entry *base, size_t ways,
+        unsigned invalidate_gen, addr_t pc) {
+    if (base == NULL || ways == 0)
+        return 0;
+    bool saw_live = false;
+    bool saw_same_page = false;
+    bool saw_generation = false;
+    bool saw_invalid_entry = false;
+    for (size_t i = 0; i < ways; i++) {
+        const struct arm64_jit_fragment_tlb_entry *entry = &base[i];
+        if (entry->block == NULL || entry->jit_entry_fn == NULL)
+            continue;
+        saw_live = true;
+        if (entry->invalidate_gen != invalidate_gen) {
+            saw_generation = true;
+            continue;
+        }
+        if (entry->page_tag != (pc >> PAGE_BITS))
+            continue;
+        saw_same_page = true;
+        if (pc >= entry->start_pc && pc < entry->end_pc) {
+            saw_invalid_entry = true;
+            continue;
+        }
+    }
+    if (!saw_live)
+        return 0;
+    if (saw_same_page)
+        return saw_invalid_entry ? 4 : 3;
+    if (saw_generation)
+        return 1;
+    return 2;
+}
+#endif
+
 static void arm64_jit_update_fragment_tlb_page(struct arm64_jit_state *state, addr_t page_pc,
         struct arm64_jit_block *block) {
     if (state->fragment_tlb == NULL || state->fragment_tlb_size == 0 ||
@@ -3256,8 +3692,27 @@ static void arm64_jit_update_fragment_tlb_page(struct arm64_jit_state *state, ad
     addr_t end_pc = block->end_pc < page_end ? block->end_pc : page_end;
     if (start_pc >= end_pc)
         return;
-    struct arm64_jit_fragment_tlb_entry *cache =
-            &state->fragment_tlb[arm64_jit_fragment_tlb_index(state, page_pc)];
+    struct arm64_jit_fragment_tlb_entry *set =
+            &state->fragment_tlb[arm64_jit_fragment_tlb_index(state, page_pc) *
+            ARM64_JIT_FRAGMENT_TLB_WAYS];
+    struct arm64_jit_fragment_tlb_entry *cache = NULL;
+    struct arm64_jit_fragment_tlb_entry *oldest = &set[0];
+    for (size_t i = 0; i < ARM64_JIT_FRAGMENT_TLB_WAYS; i++) {
+        struct arm64_jit_fragment_tlb_entry *entry = &set[i];
+        if (entry->block == block && entry->start_pc == start_pc && entry->end_pc == end_pc) {
+            cache = entry;
+            break;
+        }
+        if (entry->block == NULL || entry->jit_entry_fn == NULL ||
+                entry->invalidate_gen != state->invalidate_gen) {
+            cache = entry;
+            break;
+        }
+        if (entry->insert_serial < oldest->insert_serial)
+            oldest = entry;
+    }
+    if (cache == NULL)
+        cache = oldest;
     cache->page_tag = page_pc >> PAGE_BITS;
     cache->start_pc = start_pc;
     cache->end_pc = end_pc;
@@ -3267,6 +3722,7 @@ static void arm64_jit_update_fragment_tlb_page(struct arm64_jit_state *state, ad
     cache->spill_state_fn = block->spill_state_fn;
     cache->reload_state_fn = block->reload_state_fn;
     cache->light_spill_state_fn = block->light_spill_state_fn;
+    cache->insert_serial = ++state->fragment_tlb_insert_serial;
 }
 
 static void arm64_jit_update_fragment_tlb(struct arm64_jit_state *state,
@@ -3456,14 +3912,20 @@ static struct arm64_jit_block *arm64_jit_compile_block(addr_t start_pc, struct t
     int last_boundary = -1;
     int last_boundary_recent = -1;
     bool hit_code_end = false;
-    const uint32_t small_merge_insns = 16;
 
     while (block->insn_count < ARM64_JIT_MAX_INSNS) {
-        if (scan_pc != start_pc && arm64_jit_lookup(state, scan_pc) != NULL) {
-            if (!(block->insn_count < small_merge_insns &&
-                    arm64_jit_guest_has_likely_function_prologue(scan_pc, tlb))) {
-                hit_code_end = true;
-                break;
+        if (scan_pc != start_pc) {
+            struct arm64_jit_block *existing = arm64_jit_lookup(state, scan_pc);
+            uint32_t merged_mask = used_gpr_mask;
+            if (existing != NULL) {
+                if (!arm64_jit_can_merge_existing_block(start_pc, used_gpr_mask,
+                            existing, &merged_mask)) {
+                    hit_code_end = true;
+                    break;
+                }
+                used_gpr_mask = merged_mask;
+                if (existing->end_pc > farthest_pc)
+                    farthest_pc = existing->end_pc;
             }
         }
 
@@ -3512,9 +3974,6 @@ static struct arm64_jit_block *arm64_jit_compile_block(addr_t start_pc, struct t
             block->unsupported = true;
             block->terminal_interrupt = INT_UNDEFINED;
             boundary_here = true;
-            last_boundary = (int) block->insn_count;
-            last_boundary_recent = (int) block->insn_count;
-            break;
         } else if (info_tmp.type == INSN_BRANCH) {
             addr_t target = 0;
             bool has_target = arm64_jit_direct_branch_target(insn, scan_pc, &target);
@@ -3549,35 +4008,25 @@ static struct arm64_jit_block *arm64_jit_compile_block(addr_t start_pc, struct t
         if (boundary_here) {
             last_boundary = (int) block->insn_count;
             last_boundary_recent = (int) block->insn_count;
-            if (scan_pc >= farthest_pc - 4) {
-                if (block->insn_count < small_merge_insns &&
-                        arm64_jit_guest_has_likely_function_prologue(next_pc, tlb)) {
-                    if (next_pc + 4 > farthest_pc)
-                        farthest_pc = next_pc + 4;
-                } else {
-                    break;
-                }
-            }
         }
 
         if (next_pc >= farthest_pc) {
-            if (arm64_jit_lookup(state, next_pc) != NULL &&
-                    !(block->insn_count < small_merge_insns &&
-                        arm64_jit_guest_has_likely_function_prologue(next_pc, tlb))) {
+            struct arm64_jit_block *existing = arm64_jit_lookup(state, next_pc);
+            uint32_t merged_mask = used_gpr_mask;
+            if (existing != NULL && !arm64_jit_can_merge_existing_block(start_pc,
+                        used_gpr_mask, existing, &merged_mask)) {
                 last_boundary = (int) block->insn_count;
                 last_boundary_recent = (int) block->insn_count;
                 break;
             }
-
-            if (arm64_jit_guest_has_likely_function_prologue(next_pc, tlb)) {
-                if (block->insn_count >= small_merge_insns) {
-                    last_boundary = (int) block->insn_count;
-                    last_boundary_recent = (int) block->insn_count;
-                    break;
-                }
-                if (next_pc + 4 > farthest_pc)
-                    farthest_pc = next_pc + 4;
+            if (existing != NULL) {
+                used_gpr_mask = merged_mask;
+                if (existing->end_pc > farthest_pc)
+                    farthest_pc = existing->end_pc;
             }
+
+            if (arm64_jit_guest_has_likely_function_prologue(next_pc, tlb))
+                last_boundary = (int) block->insn_count;
         }
 
         scan_pc = next_pc;
@@ -4377,11 +4826,12 @@ int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb) {
         uint64_t handoff_after = arm64_jit_handoff_after_blocks();
         uint64_t progress_interval = arm64_jit_progress_log_interval();
         uint64_t jit_blocks = 0;
-        if (handoff_after != 0 || progress_interval != 0 || arm64_jit_helper_profile_mode()) {
+        if (handoff_after != 0 || progress_interval != 0 || arm64_jit_helper_profile_mode() ||
+                arm64_jit_fragment_page_profile_mode()) {
             jit_blocks = atomic_fetch_add_explicit(
                     &g_arm64_jit_debug_blocks, 1, memory_order_relaxed) + 1;
         }
-        if (arm64_jit_helper_profile_mode()) {
+        if (arm64_jit_helper_profile_mode() || arm64_jit_fragment_page_profile_mode()) {
             atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.dispatch_blocks, 1,
                     memory_order_relaxed);
         }
@@ -4474,7 +4924,9 @@ int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb) {
                     entry_index = covering_index;
                 } else {
                     arm64_jit_insert(state, block);
-                    entry_index = 0;
+                    entry_index = arm64_jit_find_insn_index(block, cpu->pc);
+                    if (entry_index < 0)
+                        entry_index = 0;
                 }
             }
         }

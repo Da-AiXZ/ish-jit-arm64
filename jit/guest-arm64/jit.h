@@ -21,6 +21,7 @@
 #define ARM64_JIT_PAGE_HASH_SIZE (1 << 10)
 #define ARM64_JIT_ENTRY_CACHE_SIZE (1 << 12)
 #define ARM64_JIT_FRAGMENT_TLB_SIZE (1 << 12)
+#define ARM64_JIT_FRAGMENT_TLB_WAYS 2
 #define ARM64_JIT_MAX_INSNS 1024
 #define ARM64_JIT_MAX_PC_MAP 2048
 #define ARM64_JIT_MAX_FIXUPS 2048
@@ -168,7 +169,8 @@ struct arm64_jit_fragment_tlb_entry {
     void *spill_state_fn;
     void *reload_state_fn;
     void *light_spill_state_fn;
-    void *reserved[7];
+    uint64_t insert_serial;
+    void *reserved[6];
 };
 
 struct arm64_jit_state {
@@ -186,6 +188,7 @@ struct arm64_jit_state {
     lock_t lock;
     wrlock_t jetsam_lock;
     unsigned invalidate_gen;
+    uint64_t fragment_tlb_insert_serial;
 };
 
 struct arm64_jit_runtime {
@@ -249,6 +252,11 @@ struct arm64_jit_branch_fast_profile {
     _Atomic uint64_t same_fragment_hits;
     _Atomic uint64_t fragment_tlb_hits;
     _Atomic uint64_t misses;
+    _Atomic uint64_t control_same_fragment_hits[4];
+    _Atomic uint64_t control_fragment_tlb_hits[4];
+    _Atomic uint64_t control_misses[4];
+    _Atomic uint64_t miss_reasons[6];
+    _Atomic uint64_t control_miss_reasons[4][6];
 };
 
 extern struct arm64_jit_branch_fast_profile g_arm64_jit_branch_fast_profile;
@@ -361,6 +369,8 @@ int arm64_jit_helper_syscall_jitabi(struct arm64_jit_runtime *rt, addr_t guest_p
 int arm64_jit_helper_timer_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_verify_trap_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_dispatch_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
+int arm64_jit_helper_control_transfer_fast_jitabi(struct arm64_jit_runtime *rt,
+        addr_t target_pc, uint64_t kind);
 int arm64_jit_helper_branch_reg_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_cbz_cbnz_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_b_cond_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);

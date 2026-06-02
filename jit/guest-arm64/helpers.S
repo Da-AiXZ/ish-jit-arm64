@@ -74,6 +74,7 @@
 //   spill_state_fn = 48
 //   reload_state_fn = 56
 //   light_spill_state_fn = 64
+//   insert_serial = 72
 // arm64_jit_block:
 //   start_pc = 0
 //   end_pc = 8
@@ -112,8 +113,19 @@
     add x17, x17, #1
     str x17, [x16, #\offset]
 .endm
+.macro JIT_CONTROL_FAST_PROFILE_INC base_offset, kind_reg
+    adrp x16, _g_arm64_jit_branch_fast_profile@PAGE
+    add x16, x16, _g_arm64_jit_branch_fast_profile@PAGEOFF
+    add x16, x16, #\base_offset
+    add x16, x16, \kind_reg, lsl #3
+    ldr x17, [x16]
+    add x17, x17, #1
+    str x17, [x16]
+.endm
 #else
 .macro JIT_BRANCH_FAST_PROFILE_INC offset
+.endm
+.macro JIT_CONTROL_FAST_PROFILE_INC base_offset, kind_reg
 .endm
 #endif
 
@@ -3912,6 +3924,163 @@ JITABI_C_HELPER_WRAP2 _arm64_jit_helper_cbz_cbnz_jitabi, _arm64_jit_helper_cbz_c
 JITABI_C_HELPER_WRAP2 _arm64_jit_helper_b_cond_jitabi, _arm64_jit_helper_b_cond
 JITABI_C_HELPER_WRAP2 _arm64_jit_helper_tbz_tbnz_jitabi, _arm64_jit_helper_tbz_tbnz
 JITABI_C_HELPER_WRAP2 _arm64_jit_helper_branch_reg_jitabi, _arm64_jit_helper_branch_reg
+.globl _arm64_jit_helper_control_transfer_fast_jitabi
+_arm64_jit_helper_control_transfer_fast_jitabi:
+    stp x29, x30, [sp, #-128]!
+    stp x16, x17, [sp, #16]
+    stp x0, x1, [sp, #32]         // rt, target_pc
+    stp x2, x3, [sp, #48]         // kind, spare
+    str x4, [sp, #64]
+    mrs x4, nzcv
+    str x4, [sp, #72]
+    and x2, x2, #3
+    str x2, [sp, #80]
+
+    ldr x16, [x0, #16]            // rt->block
+    cbz x16, 5f
+    ldr x17, [x16]                // block->start_pc
+    cmp x1, x17
+    b.lo 5f
+    ldr x17, [x16, #8]            // block->end_pc
+    cmp x1, x17
+    b.hs 5f
+    tst x1, #3
+    b.ne 8f
+    ldr x17, [x16]                // block->start_pc
+    sub x4, x1, x17
+    lsr x4, x4, #2                // contiguous instruction index
+    ldr w17, [x16, #24]           // block->insn_count
+    cmp x4, x17
+    b.hs 8f
+    mov x17, #0x9164              // block->insn_host_offsets
+    add x17, x16, x17
+    ldr w17, [x17, x4, lsl #2]
+    cmn w17, #1
+    b.eq 8f
+    mov x4, #0x9138               // block->code_rx
+    ldr x16, [x16, x4]
+    add x3, x16, x17
+    ldr x2, [sp, #80]
+    JIT_CONTROL_FAST_PROFILE_INC 24, x2
+    ldr x4, [sp, #72]
+    msr nzcv, x4
+    ldr x4, [sp, #64]
+    ldp x0, x1, [sp, #32]
+    ldp x16, x17, [sp, #16]
+    ldp x29, x30, [sp], #128
+    br x3
+
+5:
+    ldr x16, [sp, #32]            // rt*
+    ldr x17, [x16, #104]          // rt->fragment_tlb
+    cbz x17, 8f
+    ldr x4, [x16, #112]           // rt->fragment_tlb_size
+    cbz x4, 8f
+    ldr x1, [sp, #40]             // target_pc
+    tst x1, #3
+    b.ne 8f
+    ubfx x4, x1, #12, #12
+    add x4, x17, x4, lsl #8       // set base = base + index * 2 ways * 128
+    ldr w17, [x16, #120]          // rt->invalidate_gen
+    lsr x30, x1, #12
+Lcontrol_tlb_way0:
+    ldr w2, [x4, #24]             // entry.invalidate_gen
+    cmp w2, w17
+    b.ne Lcontrol_tlb_way1
+    ldr x2, [x4]                  // entry.page_tag
+    cmp x2, x30
+    b.ne Lcontrol_tlb_way1
+    ldr x2, [x4, #8]              // entry.start_pc
+    cmp x1, x2
+    b.lo Lcontrol_tlb_way1
+    ldr x2, [x4, #16]             // entry.end_pc
+    cmp x1, x2
+    b.lo Lcontrol_tlb_hit
+Lcontrol_tlb_way1:
+    add x4, x4, #128
+    ldr w2, [x4, #24]             // entry.invalidate_gen
+    cmp w2, w17
+    b.ne 8f
+    ldr x2, [x4]                  // entry.page_tag
+    cmp x2, x30
+    b.ne 8f
+    ldr x2, [x4, #8]              // entry.start_pc
+    cmp x1, x2
+    b.lo 8f
+    ldr x2, [x4, #16]             // entry.end_pc
+    cmp x1, x2
+    b.hs 8f
+Lcontrol_tlb_hit:
+    ldr x2, [sp, #80]
+    JIT_CONTROL_FAST_PROFILE_INC 56, x2
+    ldr x16, [x4, #32]            // entry.block
+    cbz x16, 8f
+    ldr x17, [x4, #40]            // entry.jit_entry_fn
+    cbz x17, 8f
+    str x16, [sp, #48]
+    str x17, [sp, #88]
+    ldr x16, [x4, #48]            // entry.spill_state_fn
+    str x16, [sp, #112]
+    ldr x16, [x4, #56]            // entry.reload_state_fn
+    str x16, [sp, #120]
+    ldr x16, [x4, #64]            // entry.light_spill_state_fn
+    str x16, [sp, #96]
+    ldr x16, [sp, #40]            // original target_pc
+    str x16, [sp, #104]
+    ldr x0, [sp, #32]             // rt*
+    ldr x4, [sp, #72]
+    msr nzcv, x4
+    ldr x4, [sp, #64]
+    ldr x17, [x0, #128]           // source light spill
+    cbz x17, 6f
+    blr x17
+6:
+    ldr x0, [sp, #32]
+    ldr x1, [sp, #112]            // target spill_state_fn
+    str x1, [x0, #24]
+    ldr x1, [sp, #120]            // target reload_state_fn
+    str x1, [x0, #32]
+    ldr x1, [sp, #48]             // target block
+    str x1, [x0, #16]
+    ldr x1, [sp, #88]             // target entry
+    str x1, [x0, #96]
+    ldr x16, [sp, #96]            // target light spill
+    str x16, [x0, #128]
+    ldr x1, [sp, #104]            // target_pc
+    ldr x17, [sp, #88]
+    ldr x16, [sp, #16]
+    ldp x29, x30, [sp], #128
+    JIT_FRAGMENT_EPILOGUE_AND_BR_X17
+
+8:
+    ldr x2, [sp, #80]
+    JIT_CONTROL_FAST_PROFILE_INC 88, x2
+    ldr x4, [sp, #72]
+    msr nzcv, x4
+    ldr x4, [sp, #64]
+    mov x16, x0
+    ldr x17, [x16, #24]
+    cbz x17, 9f
+    blr x17
+9:
+    ldr x0, [sp, #32]
+    ldr x1, [sp, #40]
+    bl _arm64_jit_helper_dispatch
+    add w17, w0, #1
+    cbnz w17, 10f
+    ldr x16, [sp, #32]
+    ldr x17, [x16, #32]
+    cbz x17, 10f
+    str x0, [sp, #56]
+    mov x0, x16
+    blr x17
+    ldr x0, [sp, #56]
+10:
+    ldr x4, [sp, #64]
+    ldp x16, x17, [sp, #16]
+    ldp x29, x30, [sp], #128
+    ret
+
 .globl _arm64_jit_helper_branch_reg_fast_jitabi
 _arm64_jit_helper_branch_reg_fast_jitabi:
     stp x29, x30, [sp, #-128]!
@@ -3972,24 +4141,40 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
     cbz x17, 6f
     ldr x4, [x16, #112]           // rt->fragment_tlb_size
     cbz x4, 6f
-    ubfx x4, x3, #12, #12
-    add x4, x17, x4, lsl #7       // entry = base + index * 128
-    ldr w17, [x16, #120]          // rt->invalidate_gen
-    ldr w30, [x4, #24]            // entry.invalidate_gen
-    cmp w30, w17
-    b.ne 6f
-    ldr x17, [x4]                 // entry.page_tag
-    lsr x30, x3, #12
-    cmp x17, x30
-    b.ne 6f
-    ldr x17, [x4, #8]             // entry.start_pc
-    cmp x3, x17
-    b.lo 6f
-    ldr x17, [x4, #16]            // entry.end_pc
-    cmp x3, x17
-    b.hs 6f
     tst x3, #3
     b.ne 6f
+    ubfx x4, x3, #12, #12
+    add x4, x17, x4, lsl #8       // set base = base + index * 2 ways * 128
+    ldr w17, [x16, #120]          // rt->invalidate_gen
+    lsr x30, x3, #12
+Lbranch_tlb_way0:
+    ldr w2, [x4, #24]             // entry.invalidate_gen
+    cmp w2, w17
+    b.ne Lbranch_tlb_way1
+    ldr x2, [x4]                  // entry.page_tag
+    cmp x2, x30
+    b.ne Lbranch_tlb_way1
+    ldr x2, [x4, #8]              // entry.start_pc
+    cmp x3, x2
+    b.lo Lbranch_tlb_way1
+    ldr x2, [x4, #16]             // entry.end_pc
+    cmp x3, x2
+    b.lo Lbranch_tlb_hit
+Lbranch_tlb_way1:
+    add x4, x4, #128
+    ldr w2, [x4, #24]             // entry.invalidate_gen
+    cmp w2, w17
+    b.ne 6f
+    ldr x2, [x4]                  // entry.page_tag
+    cmp x2, x30
+    b.ne 6f
+    ldr x2, [x4, #8]              // entry.start_pc
+    cmp x3, x2
+    b.lo 6f
+    ldr x2, [x4, #16]             // entry.end_pc
+    cmp x3, x2
+    b.hs 6f
+Lbranch_tlb_hit:
     str xzr, [sp, #96]            // non-BLR paths do not publish LR.
     ldr x30, [sp, #48]            // original insn
     ubfx x30, x30, #21, #4

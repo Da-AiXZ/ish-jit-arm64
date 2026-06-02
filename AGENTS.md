@@ -249,6 +249,23 @@ Use syscall-segment profiling to compare guest execution time between syscall
 boundaries. This is useful when a complete workload is slower under JIT but the
 syscall count and stdout are correct.
 
+Hot-path hit/miss counters for JIT-to-JIT branch resolution are gated by the
+Meson option `arm64_jit_perf_counters`. Enable it explicitly before diagnosing
+fragment-cache hit rates:
+
+```bash
+meson configure build-arm64-release -Darm64_jit_perf_counters=true
+env CCACHE_DIR=/private/tmp/ish-arm64-ccache ninja -C build-arm64-release
+```
+
+Turn it back off for normal performance measurements if counter increments are
+not part of the experiment:
+
+```bash
+meson configure build-arm64-release -Darm64_jit_perf_counters=false
+env CCACHE_DIR=/private/tmp/ish-arm64-ccache ninja -C build-arm64-release
+```
+
 ### Default backend syscall segments
 
 ```bash
@@ -277,15 +294,55 @@ Each `[syscall-segment]` line reports:
 The helper-family deltas only become nonzero when
 `ISH_ARM64_JIT_HELPER_PROFILE=1` is enabled.
 
+With `arm64_jit_perf_counters=true`, helper-profile output also includes:
+
+- `branch_fast same_fragment/fragment_tlb/misses` for `BR`/`BLR`/`RET`
+- `control_fast dispatch/b_cond/cbz/tbz=same_fragment/fragment_tlb/misses`
+  for fixed-target and conditional control transfers
+
+### Fragment-Per-Page Profiling
+
+Use this when diagnosing fragment-cache associativity and whether hot guest code
+pages are split into many live fragments:
+
+```bash
+timeout 30s env ISH_ARM64_BACKEND=arm64_jit \
+  ISH_ARM64_JIT_FRAGMENT_PAGE_PROFILE=1 \
+  ISH_ARM64_JIT_FRAGMENT_PAGE_PROFILE_INTERVAL=5000000 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk stats \
+  > /private/tmp/apk_pagefrag.stdout \
+  2> /private/tmp/apk_pagefrag.stderr
+```
+
+For an exact final-ish snapshot, use interval `1` and inspect only the last
+`[arm64-jit-fragment-page-profile] pages=...` group; this produces much more
+stderr.
+
+Use `ISH_ARM64_JIT_FRAGMENT_PAGE_DETAIL=0xPAGE` with the same bounded command
+to print each live fragment that overlaps a page. This is useful when a page
+has many fragments and the top-line count alone does not explain why.
+
+Common control families should use the fast resolver rather than old C helper
+wrappers:
+
+- fixed-target `B`/`BL`
+- nonlocal conditional `B.cond`
+- nonlocal `CBZ`/`CBNZ`, including uncached tested registers loaded from CPU
+  state
+- nonlocal `TBZ`/`TBNZ`, including uncached tested registers loaded from CPU
+  state
+- branch-register forms `BR`/`BLR`/`RET`
+
 ## Branch-Link Notes
 
 Plain JIT and verifier mode should use the same instruction implementations;
 verifier mode should differ only by inserted verifier `brk` sites.
 
 Fixed-target `BL` currently sets guest `LR` to `guest_pc + 4`, then branches to
-the target. Same-fragment targets use local fixups. Cross-fragment targets exit
-to dispatch at the target, like other nonlocal control transfers. Do not
-reintroduce C-managed nested direct-call continuation semantics for `BL`.
+the target. Same-fragment targets use local fixups. Cross-fragment targets use
+the same fast control-transfer resolver as other nonlocal control transfers and
+only fall back to C dispatch on resolver miss. Do not reintroduce C-managed
+nested direct-call continuation semantics for `BL`.
 
 ## Dump Mode
 
@@ -427,6 +484,17 @@ Important invariants for future JIT-to-JIT transfer work:
   Exact self-branches route through the helper path. If the local-fixup table is
   full, the emitter must fall back to the helper path instead of emitting an
   unpatched placeholder branch; an unpatched `b #0` is a host self-loop bug.
+- Fragment splitting should treat indirect branches, returns, exceptions, and
+  unsupported instructions as boundary candidates, not hard boundaries. The
+  scanner keeps moving until it hits code/address-space boundary, max
+  instruction count, or register-cache overflow. On overflow or max scan, cut
+  at the latest candidate boundary if it is in the recent half of the scan;
+  otherwise materialize the whole scanned range.
+- Already compiled block starts are also not absolute hard stops when the new
+  fragment can safely merge and later supersede the contained block. A merge is
+  safe only when the combined contiguous range still fits
+  `ARM64_JIT_MAX_INSNS` and the combined analyzed GPR-use mask does not exceed
+  `ARM64_JIT_MAX_ALLOCATABLE_GPRS`.
 
 ### Fragment TLB Probe State
 
