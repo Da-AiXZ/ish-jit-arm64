@@ -257,6 +257,8 @@ struct arm64_jit_branch_fast_profile {
     _Atomic uint64_t control_misses[4];
     _Atomic uint64_t miss_reasons[6];
     _Atomic uint64_t control_miss_reasons[4][6];
+    _Atomic uint64_t same_page_range_pages[64];
+    _Atomic uint64_t same_page_range_page_counts[64];
 };
 
 extern struct arm64_jit_branch_fast_profile g_arm64_jit_branch_fast_profile;

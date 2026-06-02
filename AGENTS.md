@@ -314,13 +314,27 @@ timeout 30s env ISH_ARM64_BACKEND=arm64_jit \
   2> /private/tmp/apk_pagefrag.stderr
 ```
 
-For an exact final-ish snapshot, use interval `1` and inspect only the last
-`[arm64-jit-fragment-page-profile] pages=...` group; this produces much more
-stderr.
+To take a late single-bucket snapshot, set
+`ISH_ARM64_JIT_FRAGMENT_PAGE_PROFILE_INTERVAL` just below the expected final
+`dispatch_blocks` count for the target. This is useful for avoiding very large
+logs while still getting a near-final page-fragment layout.
 
 Use `ISH_ARM64_JIT_FRAGMENT_PAGE_DETAIL=0xPAGE` with the same bounded command
 to print each live fragment that overlaps a page. This is useful when a page
 has many fragments and the top-line count alone does not explain why.
+
+With `arm64_jit_perf_counters=true`, helper-profile output includes the top
+branch-reg `same_page_range` miss pages. To sample the actual 2-way fragment
+cache set contents at miss time for one page, use:
+
+```bash
+ISH_ARM64_JIT_BRANCH_MISS_DETAIL=0xPAGE
+```
+
+This prints at most 128 lines and is intended for associativity/thrashing
+diagnosis. Do not use `ISH_ARM64_JIT_FRAGMENT_PAGE_PROFILE_INTERVAL=0` as a
+final-only mode. Interval `0` currently buckets by every dispatch count and can
+produce very large logs.
 
 Common control families should use the fast resolver rather than old C helper
 wrappers:
