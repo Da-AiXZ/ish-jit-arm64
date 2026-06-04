@@ -36,8 +36,15 @@ when a task needs to be split.
   - Re-measure direct-mapped conflict churn now that L2 range-fragment TLB and
     L3 compact page-list lookup are both active.
 - Reduce remaining `/sbin/apk stats` slow C-helper volume.
-  - Latest profile still shows many C-helper fallbacks in memory families,
-    especially `regoff`, `excl`, and `imm9`.
+  - Current memory fast paths cover the hot scalar regoff forms, SIMD imm9
+    signed-offset stores, LD-exclusive TLB hits, and scalar pair valid-form TLB
+    misses via the shared page helper.
+  - Latest profiled C-helper counts for `/sbin/apk stats`:
+    `imm9=6941`, `regoff=21749`, `pair=18059`, `excl=148956`.
+  - Remaining dominant memory C-helper volume is `STXR`/`STLXR` CAS/status
+    stores; implement a dedicated fast helper before trying to inline them.
+  - Remaining pair C-helper volume is mostly invalid/unmodeled forms such as
+    writeback stack pairs and vector pairs that still require full semantics.
   - Full quiet verifier for `/sbin/apk stats` still exceeds a 30s bound without
     a mismatch; use smaller frontiers or longer bounded verifier runs when
     proving correctness.

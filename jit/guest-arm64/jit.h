@@ -132,6 +132,7 @@ struct arm64_jit_block {
     uint32_t entry_thunks_offset;
     uint32_t insn_host_offsets[ARM64_JIT_MAX_INSNS];
     void *entry_code[ARM64_JIT_MAX_INSNS];
+    void *c_entry_fn;
     void *jit_entry_fn;
     uint32_t pc_map_count;
     struct arm64_jit_pc_map pc_map[ARM64_JIT_MAX_PC_MAP];
@@ -145,7 +146,6 @@ struct arm64_jit_block {
     struct arm64_jit_backedge_safepoint backedge_safepoints[ARM64_JIT_MAX_FIXUPS];
     void *light_spill_state_fn;
     uint32_t light_spill_code_offset;
-    bool light_spill_fp_state;
 };
 
 struct arm64_jit_entrypoint {
@@ -287,6 +287,9 @@ struct arm64_jit_helper_profile_snapshot {
 };
 
 void arm64_jit_get_helper_profile_snapshot(struct arm64_jit_helper_profile_snapshot *out);
+void arm64_jit_dispatch_pc_segment_reset(void);
+void arm64_jit_dispatch_pc_segment_dump(uint64_t segment_index, addr_t syscall_pc,
+        uint32_t syscall_num, uint64_t dispatch_blocks);
 
 #ifdef ISH_ARM64_JIT_PERF_COUNTERS
 struct arm64_jit_branch_fast_profile {

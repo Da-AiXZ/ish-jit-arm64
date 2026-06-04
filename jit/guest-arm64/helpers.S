@@ -2063,6 +2063,36 @@ _arm64_jit_helper_simd_ldst_imm_unsigned_live:
     ubfx x17, x16, #0, #5
     JIT_SIMD_SYNC_CPU_TO_Q x17, x0
 21:
+    ldr w16, [sp, #136]            // insn low 32
+    ubfx x17, x16, #27, #3
+    cmp x17, #7
+    b.ne 24f
+    tbz x16, #25, 25f
+    b 24f
+25:
+    tbnz x16, #24, 24f
+    tbnz x16, #21, 24f             // only signed imm9 SIMD forms have writeback here
+    ubfx x17, x16, #10, #2         // mode
+    cbz x17, 24f                   // unscaled: no writeback
+    cmp x17, #2
+    b.eq 24f                       // unprivileged/unsupported mode
+    ldr x1, [sp, #152]             // access address
+    cmp x17, #1
+    b.ne 22f                       // pre-index writeback is the access address
+    sbfx x2, x16, #12, #9
+    add x1, x1, x2                 // post-index writeback = original base + imm9
+22:
+    ubfx x2, x16, #5, #5           // rn
+    ldr x17, [sp, #128]
+    ldr x17, [x17, #0]             // cpu*
+    cmp x2, #31
+    b.ne 23f
+    str x1, [x17, #264]            // cpu->sp
+    b 24f
+23:
+    add x17, x17, #16
+    str x1, [x17, x2, lsl #3]      // cpu->regs[rn]
+24:
     ldr w1, [sp, #140]
     add x1, x1, #4
     ldr x16, [sp, #128]
@@ -3649,7 +3679,8 @@ _arm64_jit_helper_ldst_pair_load_live:
     cmp x1, #0xfff
     bhi 90f
 
-    JIT_TLB_LOOKUP_READ_HIT x2, x0, x1, x17, 90f
+    JIT_TLB_LOOKUP_READ_HIT x2, x0, x1, x17, 80f
+81:
     ldr x1, [sp, #40]              // packed
     ldr x3, [sp, #56]              // return_in_x1_x2
     and x17, x2, #0xfff
@@ -3708,6 +3739,12 @@ _arm64_jit_helper_ldst_pair_load_live:
     ldp x16, x17, [sp, #16]
     ldp x29, x30, [sp], #176
     ret
+80:
+    ldr x1, [sp, #40]              // packed
+    mov x0, x21
+    mov x4, #0
+    bl _arm64_jit_mem_lookup_page_live
+    b 81b
 90:
     ldr x16, [sp, #160]
     msr nzcv, x16
@@ -3817,7 +3854,8 @@ _arm64_jit_helper_ldst_pair_store_live:
     cmp x1, #0xfff
     bhi 90f
 
-    JIT_TLB_LOOKUP_WRITE_HIT x2, x0, x1, x17, 90f
+    JIT_TLB_LOOKUP_WRITE_HIT x2, x0, x1, x17, 80f
+81:
     ldr x1, [sp, #40]              // packed
     ldr x3, [sp, #56]              // val0
     and x17, x2, #0xfff
@@ -3853,6 +3891,12 @@ _arm64_jit_helper_ldst_pair_store_live:
     ldp x16, x17, [sp, #16]
     ldp x29, x30, [sp], #176
     ret
+80:
+    ldr x1, [sp, #40]              // packed
+    mov x0, x21
+    mov x4, #1
+    bl _arm64_jit_mem_lookup_page_live
+    b 81b
 90:
     ldr x0, [sp, #32]
     ldr x16, [x0, #24]
@@ -4264,9 +4308,10 @@ Lcontrol_cross_fragment_hit:
     str x16, [x0, #128]
     ldr x1, [sp, #40]             // target_pc
     ldr x17, [sp, #88]
-    ldr x16, [sp, #16]
+    ldp x16, x17, [sp, #16]
+    ldr x17, [sp, #88]
     ldp x29, x30, [sp], #128
-    JIT_FRAGMENT_EPILOGUE_AND_BR_X17
+    br x17
 
 8:
     ldr x2, [sp, #80]
@@ -4492,10 +4537,11 @@ Lbranch_cross_fragment_hit:
     str x16, [x0, #32]            // rt->reload_state_fn
     ldr x16, [sp, #80]
     str x16, [x0, #128]           // rt->light_spill_state_fn
-    mov x1, x3                    // target_pc for target entry resolver
-    ldr x16, [sp, #16]
+    mov x1, x3                    // target_pc for diagnostics; light entry uses rt->entry_target
+    ldp x16, x17, [sp, #16]
+    ldr x17, [sp, #88]
     ldp x29, x30, [sp], #128
-    JIT_FRAGMENT_EPILOGUE_AND_BR_X17
+    br x17
 
 6:
 2:

@@ -138,6 +138,29 @@ struct arm64_jit_helper_profile {
 
 static struct arm64_jit_helper_profile g_arm64_jit_helper_profile;
 
+#define ARM64_JIT_DISPATCH_PC_TOP_N 32
+struct arm64_jit_dispatch_pc_top_entry {
+    _Atomic uint64_t count;
+    _Atomic uint64_t pc;
+};
+
+static struct arm64_jit_dispatch_pc_top_entry
+        g_arm64_jit_dispatch_pc_top[ARM64_JIT_DISPATCH_PC_TOP_N];
+static __thread struct arm64_jit_dispatch_pc_top_entry
+        g_arm64_jit_dispatch_pc_segment_top[ARM64_JIT_DISPATCH_PC_TOP_N];
+
+#ifdef ISH_ARM64_JIT_PERF_COUNTERS
+#define ARM64_JIT_MEM_C_HELPER_TOP_N 16
+struct arm64_jit_mem_c_helper_top_entry {
+    _Atomic uint64_t count;
+    _Atomic uint64_t pc;
+    _Atomic uint32_t insn;
+};
+
+static struct arm64_jit_mem_c_helper_top_entry
+        g_arm64_jit_mem_c_helper_top[4][ARM64_JIT_MEM_C_HELPER_TOP_N];
+#endif
+
 static int arm64_jit_helper_profile_mode(void);
 static void arm64_jit_dump_helper_profile(void);
 static int arm64_jit_fragment_page_profile_mode(void);
@@ -662,6 +685,15 @@ static uint64_t arm64_jit_progress_log_interval(void) {
     return interval;
 }
 
+static int arm64_jit_dispatch_pc_profile_mode(void) {
+    static int profile_mode = -1;
+    if (profile_mode == -1) {
+        const char *env = getenv("ISH_ARM64_JIT_DISPATCH_PC_PROFILE");
+        profile_mode = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+    return profile_mode;
+}
+
 static int arm64_jit_helper_profile_mode(void) {
     static int profile_mode = -1;
     if (profile_mode == -1) {
@@ -682,6 +714,124 @@ static void arm64_jit_profile_inc_c_helper(_Atomic uint64_t *family_counter) {
     atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.c_helper_total, 1,
             memory_order_relaxed);
     atomic_fetch_add_explicit(family_counter, 1, memory_order_relaxed);
+}
+
+static void arm64_jit_dispatch_pc_top_record(
+        struct arm64_jit_dispatch_pc_top_entry *entries, addr_t pc) {
+    uint64_t min_count = UINT64_MAX;
+    unsigned min_index = 0;
+    for (unsigned i = 0; i < ARM64_JIT_DISPATCH_PC_TOP_N; i++) {
+        uint64_t seen_pc = atomic_load_explicit(&entries[i].pc, memory_order_relaxed);
+        uint64_t count = atomic_load_explicit(&entries[i].count, memory_order_relaxed);
+        if (seen_pc == pc) {
+            atomic_fetch_add_explicit(&entries[i].count, 1, memory_order_relaxed);
+            return;
+        }
+        if (count < min_count) {
+            min_count = count;
+            min_index = i;
+        }
+    }
+    if (min_count == 0) {
+        uint64_t expected = 0;
+        if (atomic_compare_exchange_strong_explicit(&entries[min_index].pc,
+                    &expected, pc, memory_order_relaxed, memory_order_relaxed)) {
+            atomic_store_explicit(&entries[min_index].count, 1, memory_order_relaxed);
+            return;
+        }
+    }
+    atomic_store_explicit(&entries[min_index].pc, pc, memory_order_relaxed);
+    atomic_store_explicit(&entries[min_index].count, min_count + 1,
+            memory_order_relaxed);
+}
+
+static void arm64_jit_profile_dispatch_pc(addr_t pc) {
+    if (!arm64_jit_dispatch_pc_profile_mode())
+        return;
+    arm64_jit_dispatch_pc_top_record(g_arm64_jit_dispatch_pc_top, pc);
+    arm64_jit_dispatch_pc_top_record(g_arm64_jit_dispatch_pc_segment_top, pc);
+}
+
+void arm64_jit_dispatch_pc_segment_reset(void) {
+    memset(g_arm64_jit_dispatch_pc_segment_top, 0,
+            sizeof(g_arm64_jit_dispatch_pc_segment_top));
+}
+
+static uint64_t arm64_jit_dispatch_pc_segment_min_blocks(void) {
+    static bool inited;
+    static uint64_t min_blocks;
+    if (!inited) {
+        const char *env = getenv("ISH_ARM64_JIT_DISPATCH_PC_SEGMENT_MIN_BLOCKS");
+        min_blocks = (env != NULL && env[0] != '\0') ? strtoull(env, NULL, 0) : 0;
+        inited = true;
+    }
+    return min_blocks;
+}
+
+void arm64_jit_dispatch_pc_segment_dump(uint64_t segment_index, addr_t syscall_pc,
+        uint32_t syscall_num, uint64_t dispatch_blocks) {
+    if (!arm64_jit_dispatch_pc_profile_mode())
+        return;
+    uint64_t min_blocks = arm64_jit_dispatch_pc_segment_min_blocks();
+    if (min_blocks != 0 && dispatch_blocks < min_blocks)
+        return;
+    for (unsigned i = 0; i < ARM64_JIT_DISPATCH_PC_TOP_N; i++) {
+        uint64_t count = atomic_load_explicit(&g_arm64_jit_dispatch_pc_segment_top[i].count,
+                memory_order_relaxed);
+        uint64_t pc = atomic_load_explicit(&g_arm64_jit_dispatch_pc_segment_top[i].pc,
+                memory_order_relaxed);
+        if (count == 0 || pc == 0)
+            continue;
+        fprintf(stderr,
+                "[arm64-jit-dispatch-pc-segment] index=%llu syscall_pc=0x%llx syscall=%u "
+                "dispatch_blocks=%llu slot=%u count=%llu pc=0x%llx\n",
+                (unsigned long long) segment_index,
+                (unsigned long long) syscall_pc,
+                syscall_num,
+                (unsigned long long) dispatch_blocks,
+                i,
+                (unsigned long long) count,
+                (unsigned long long) pc);
+    }
+}
+
+static void arm64_jit_profile_mem_c_helper_top(unsigned family, addr_t guest_pc, uint32_t insn) {
+#ifdef ISH_ARM64_JIT_PERF_COUNTERS
+    if (!arm64_jit_helper_profile_mode() || family >= 4)
+        return;
+    struct arm64_jit_mem_c_helper_top_entry *entries = g_arm64_jit_mem_c_helper_top[family];
+    uint64_t min_count = UINT64_MAX;
+    unsigned min_index = 0;
+    for (unsigned i = 0; i < ARM64_JIT_MEM_C_HELPER_TOP_N; i++) {
+        uint64_t pc = atomic_load_explicit(&entries[i].pc, memory_order_relaxed);
+        uint64_t count = atomic_load_explicit(&entries[i].count, memory_order_relaxed);
+        if (pc == guest_pc) {
+            atomic_store_explicit(&entries[i].insn, insn, memory_order_relaxed);
+            atomic_fetch_add_explicit(&entries[i].count, 1, memory_order_relaxed);
+            return;
+        }
+        if (count < min_count) {
+            min_count = count;
+            min_index = i;
+        }
+    }
+    if (min_count == 0) {
+        uint64_t expected = 0;
+        if (atomic_compare_exchange_strong_explicit(&entries[min_index].pc, &expected,
+                    guest_pc, memory_order_relaxed, memory_order_relaxed)) {
+            atomic_store_explicit(&entries[min_index].insn, insn, memory_order_relaxed);
+            atomic_store_explicit(&entries[min_index].count, 1, memory_order_relaxed);
+            return;
+        }
+    }
+    atomic_store_explicit(&entries[min_index].pc, guest_pc, memory_order_relaxed);
+    atomic_store_explicit(&entries[min_index].insn, insn, memory_order_relaxed);
+    atomic_store_explicit(&entries[min_index].count, min_count + 1, memory_order_relaxed);
+#else
+    (void) family;
+    (void) guest_pc;
+    (void) insn;
+#endif
 }
 
 void arm64_jit_get_helper_profile_snapshot(struct arm64_jit_helper_profile_snapshot *out) {
@@ -823,7 +973,38 @@ static void arm64_jit_dump_helper_profile(void) {
                     &g_arm64_jit_helper_profile.unsupported, memory_order_relaxed),
             (unsigned long long) atomic_load_explicit(
                     &g_arm64_jit_helper_profile.misc_helper, memory_order_relaxed));
+    if (arm64_jit_dispatch_pc_profile_mode()) {
+        for (unsigned i = 0; i < ARM64_JIT_DISPATCH_PC_TOP_N; i++) {
+            uint64_t count = atomic_load_explicit(&g_arm64_jit_dispatch_pc_top[i].count,
+                    memory_order_relaxed);
+            uint64_t pc = atomic_load_explicit(&g_arm64_jit_dispatch_pc_top[i].pc,
+                    memory_order_relaxed);
+            if (count == 0 || pc == 0)
+                continue;
+            fprintf(stderr,
+                    "[arm64-jit-helper-profile] dispatch_pc_top slot=%u count=%llu pc=0x%llx\n",
+                    i, (unsigned long long) count, (unsigned long long) pc);
+        }
+    }
 #ifdef ISH_ARM64_JIT_PERF_COUNTERS
+    static const char *const mem_names[4] = {"imm9", "regoff", "pair", "excl"};
+    for (unsigned family = 0; family < 4; family++) {
+        for (unsigned i = 0; i < ARM64_JIT_MEM_C_HELPER_TOP_N; i++) {
+            uint64_t count = atomic_load_explicit(
+                    &g_arm64_jit_mem_c_helper_top[family][i].count, memory_order_relaxed);
+            uint64_t pc = atomic_load_explicit(
+                    &g_arm64_jit_mem_c_helper_top[family][i].pc, memory_order_relaxed);
+            uint32_t insn = atomic_load_explicit(
+                    &g_arm64_jit_mem_c_helper_top[family][i].insn, memory_order_relaxed);
+            if (count == 0 || pc == 0)
+                continue;
+            fprintf(stderr,
+                    "[arm64-jit-helper-profile] mem_c_top family=%s rank_slot=%u "
+                    "count=%llu pc=0x%llx insn=0x%08x\n",
+                    mem_names[family], i, (unsigned long long) count,
+                    (unsigned long long) pc, insn);
+        }
+    }
     fprintf(stderr,
             "[arm64-jit-helper-profile] branch_fast same_fragment=%llu fragment_tlb=%llu misses=%llu\n",
             (unsigned long long) atomic_load_explicit(
@@ -2692,6 +2873,7 @@ int arm64_jit_c_simd_ldst_addr(struct arm64_jit_runtime *rt, uint64_t packed,
     uint32_t size = (insn >> 30) & 0x3;
     uint32_t opc = (insn >> 22) & 0x3;
     uint32_t rt_reg = ARM64_RT(insn);
+    uint32_t rn = ARM64_RN(insn);
     addr_t addr = (addr_t) guest_addr;
     bool is_load = (opc & 1) == 1;
     int rc = -1;
@@ -2784,6 +2966,20 @@ int arm64_jit_c_simd_ldst_addr(struct arm64_jit_runtime *rt, uint64_t packed,
         rt->resume_pc = guest_pc;
         rt->exit_interrupt = INT_GPF;
         return INT_GPF;
+    }
+
+    if ((insn & 0x3b200000u) == 0x38000000u) {
+        uint32_t mode = (insn >> 10) & 0x3;
+        if (mode == 1 || mode == 3) {
+            int32_t imm9 = (int32_t) ((insn >> 12) & 0x1ff);
+            if (imm9 & 0x100)
+                imm9 |= ~0x1ff;
+            addr_t writeback = mode == 1 ? (addr + imm9) : addr;
+            if (rn == 31)
+                cpu->sp = writeback;
+            else
+                cpu->regs[rn] = writeback;
+        }
     }
 
     rt->resume_pc = guest_pc + 4;
@@ -2883,6 +3079,7 @@ int arm64_jit_c_simd_ldst_multi(struct arm64_jit_runtime *rt, addr_t guest_pc,
 
 int arm64_jit_c_ldst_imm9(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
     arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_ldst_imm9);
+    arm64_jit_profile_mem_c_helper_top(0, guest_pc, insn);
     uint32_t size = (insn >> 30) & 0x3;
     uint32_t V = (insn >> 26) & 1;
     uint32_t opc = (insn >> 22) & 0x3;
@@ -3106,6 +3303,7 @@ int arm64_jit_c_ldst_imm9(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_
 
 int arm64_jit_c_ldst_regoff(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
     arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_ldst_regoff);
+    arm64_jit_profile_mem_c_helper_top(1, guest_pc, insn);
     uint32_t size = (insn >> 30) & 0x3;
     uint32_t V = (insn >> 26) & 1;
     uint32_t opc = (insn >> 22) & 0x3;
@@ -3306,6 +3504,7 @@ int arm64_jit_c_ldst_regoff(struct arm64_jit_runtime *rt, addr_t guest_pc, uint3
 
 int arm64_jit_c_ldst_pair(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
     arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_ldst_pair);
+    arm64_jit_profile_mem_c_helper_top(2, guest_pc, insn);
     uint32_t opc = (insn >> 30) & 0x3;
     uint32_t V = (insn >> 26) & 1;
     uint32_t mode = (insn >> 23) & 0x7;
@@ -3638,35 +3837,6 @@ bool arm64_jit_analyze_insn(uint32_t insn, struct arm64_jit_insn_info *info) {
     }
 }
 
-static bool arm64_jit_insn_may_dirty_host_fp_state(uint32_t insn,
-        const struct arm64_jit_insn_info *info) {
-    if (info->type == INSN_SIMD_FP)
-        return true;
-    if (info->type == INSN_LD_ST && ((insn >> 26) & 1) != 0)
-        return true;
-    if (info->type != INSN_SYSTEM)
-        return false;
-    if ((insn & 0xfff00000U) == 0xd5100000U) {
-        uint32_t op0 = (insn >> 19) & 0x3;
-        uint32_t op1 = (insn >> 16) & 0x7;
-        uint32_t crn = (insn >> 12) & 0xf;
-        uint32_t crm = (insn >> 8) & 0xf;
-        uint32_t op2 = (insn >> 5) & 0x7;
-        return op0 == 3 && op1 == 3 && crn == 4 && crm == 4 && op2 <= 1;
-    }
-    return false;
-}
-
-static void arm64_jit_analyze_block_light_spill(struct arm64_jit_block *block) {
-    block->light_spill_fp_state = false;
-    for (uint32_t i = 0; i < block->insn_count; i++) {
-        if (arm64_jit_insn_may_dirty_host_fp_state(block->insns[i], &block->infos[i])) {
-            block->light_spill_fp_state = true;
-            return;
-        }
-    }
-}
-
 void arm64_jit_build_fragment_gpr_map(struct arm64_jit_block *block) {
     static const int alloc_pool[ARM64_JIT_MAX_ALLOCATABLE_GPRS] = {
         4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
@@ -3946,7 +4116,7 @@ static uint32_t arm64_jit_host_offset_for_pc(const struct arm64_jit_block *block
 static void *arm64_jit_block_shared_entry_fn(const struct arm64_jit_block *block) {
     if (block == NULL)
         return NULL;
-    return block->entry_code[0] != NULL ? block->entry_code[0] : block->jit_entry_fn;
+    return block->jit_entry_fn;
 }
 
 static void arm64_jit_fill_pc_target_cache_from_block(struct arm64_jit_state *state,
@@ -4706,7 +4876,6 @@ finalize_block:
     }
 
     arm64_jit_build_fragment_gpr_map(block);
-    arm64_jit_analyze_block_light_spill(block);
     arm64_jit_emit_block(state, block);
     arm64_jit_dump_block_json(block);
     if (arm64_jit_trace_mode()) {
@@ -4964,6 +5133,7 @@ static bool arm64_jit_verify_snapshot_compare_after(const struct arm64_jit_verif
 
 int arm64_jit_c_ldst_excl(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn) {
     arm64_jit_profile_inc_c_helper(&g_arm64_jit_helper_profile.c_ldst_excl);
+    arm64_jit_profile_mem_c_helper_top(3, guest_pc, insn);
     uint32_t size = (insn >> 30) & 0x3;
     uint32_t o2 = (insn >> 23) & 1;
     uint32_t L = (insn >> 22) & 1;
@@ -5493,6 +5663,7 @@ int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb) {
             atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.dispatch_blocks, 1,
                     memory_order_relaxed);
         }
+        arm64_jit_profile_dispatch_pc(cpu->pc);
         if (handoff_after != 0 && jit_blocks > handoff_after) {
             if (current != NULL)
                 current->exec_backend = CPU_BACKEND_THREADED;

@@ -221,7 +221,8 @@ The branch-reg resolver shape is:
   and branch directly with no spill
 - cross-fragment cache hit: restore touched live JIT state, call the source
   fragment `light_spill_state_fn`, update runtime block/spill/reload/light-spill
-  fields, then enter the target fragment resolver
+  fields and `rt->entry_target`, then branch to the target JIT-to-JIT light
+  entry without running the source fragment full epilogue
 - cache miss/failure: restore touched live JIT state, call the source fragment
   full `spill_state_fn`, then fall back to the C branch-register helper
 
@@ -293,6 +294,23 @@ Each `[syscall-segment]` line reports:
 
 The helper-family deltas only become nonzero when
 `ISH_ARM64_JIT_HELPER_PROFILE=1` is enabled.
+
+To find which guest PCs cause repeated returns to the outer JIT dispatcher
+inside one syscall-bounded segment, enable dispatch-PC profiling:
+
+```bash
+timeout 30s env ISH_SYSCALL_SEGMENT_PROFILE=1 ISH_ARM64_BACKEND=arm64_jit \
+  ISH_ARM64_JIT_HELPER_PROFILE=1 ISH_ARM64_JIT_HELPER_PROFILE_INTERVAL=0 \
+  ISH_ARM64_JIT_DISPATCH_PC_PROFILE=1 \
+  ISH_ARM64_JIT_DISPATCH_PC_SEGMENT_MIN_BLOCKS=20000 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk stats \
+  > /private/tmp/apk_dispatch_pc_segment.stdout \
+  2> /private/tmp/apk_dispatch_pc_segment.stderr
+```
+
+The segment-local dispatch-PC table is reset after each segment dump.
+`[arm64-jit-dispatch-pc-segment]` lines therefore describe guest dispatches
+from the syscall-bounded segment that produced the same `index`.
 
 With `arm64_jit_perf_counters=true`, helper-profile output also includes branch
 fast counters:
@@ -476,6 +494,23 @@ Current indexed scalar-pair rule:
   must reload the cached base/SP register from `cpu` after helper success.
   Otherwise the helper updates canonical CPU state but the fragment continues
   with a stale cached base register.
+- Scalar unscaled `imm9` loads/stores and scalar register-offset loads/stores
+  should use emitted TLB-hit fast paths when base/offset/value registers are
+  cached or can be materialized from canonical CPU state. Register-offset
+  address emission supports common `UXTW`, `LSL`, `SXTW`, and `SXTX` option
+  forms; do not hand-write bitfield encodings for this path after the previous
+  `UXTW` constant accidentally emitted `lsl #32`.
+- For scalar register-offset stores, compute the effective address before
+  materializing the store value in `x3`; address calculation uses `x3` as a
+  temporary for scaled offsets.
+- Scalar pair live helpers use emitted TLB-hit fast paths and route valid-form
+  TLB misses through the shared page helper. Invalid/unmodeled pair forms still
+  fall back to the C helper.
+- Exclusive/acquire-release memory is split by semantic risk. Common
+  single-register `LDXR`/`LDAXR` TLB-hit cases are lowered inline and publish
+  `cpu->excl_addr`/`cpu->excl_val`; `STXR`/`STLXR`, acquire/release
+  non-exclusive forms, and pair-exclusive forms still go through the C helper
+  until their CAS/status-writeback path has a dedicated fast helper.
 
 ## Current Fragment Lookup Direction
 
@@ -529,9 +564,9 @@ Important invariants for future JIT-to-JIT transfer work:
   TLB, then the compact code-page fragment list to resolve the target block and
   exact dispatch-table slot, then light-spill source cached registers, update
   the runtime block/spill/reload/light-spill state, and enter the target
-  fragment shared entry. Fast-cache metadata must advertise the target
-  fragment shared-entry snippet, not the target resolver snippet, because the
-  fast path has already resolved `rt->entry_target`.
+  fragment JIT-to-JIT light entry. Fast-cache metadata must advertise the target
+  light-entry snippet, not a target resolver snippet, because the fast path has
+  already resolved `rt->entry_target`.
 - Non-self local backward branches may stay inside fragments for performance.
   Exact self-branches route through the helper path. If the local-fixup table is
   full, the emitter must fall back to the helper path instead of emitting an
@@ -561,7 +596,7 @@ The helpers handle:
 - cross-fragment control transfer by probing L1 exact-PC cache, L2 2-way
   fragment TLB, and L3 compact code-page fragment list, light-spilling source
   cached state, updating runtime block/spill/reload/light-spill state and
-  `rt->entry_target`, then entering the target fragment shared entry
+  `rt->entry_target`, then entering the target fragment JIT-to-JIT light entry
 - miss/failure by restoring touched JIT state, full-spilling source state, and
   falling back to the normal C branch-register helper
 
@@ -594,10 +629,19 @@ Important lessons from the direct-handoff probe:
 - Do not overload `spill_state_fn` for light transfers. Existing helper/fault
   paths depend on it being a full architectural spill. JIT-to-JIT cache hits use
   the separate `light_spill_state_fn`, which publishes cached GPRs, guest SP,
-  and NZCV; it also publishes FPCR/FPSR and vector registers for fragments that
-  may dirty host FP/SIMD state.
+  and NZCV only. It must not publish FPCR/FPSR or vector registers.
+- Fragment entry is split by caller ABI. C/runtime dispatch enters through the
+  full C entry, which emits the normal fragment prologue and reloads GPR,
+  NZCV, FPCR/FPSR, and all vector registers from canonical CPU state. JIT-to-JIT
+  fast transfers enter through the light entry, which assumes the original
+  fragment frame is still active and reloads only GPRs, guest SP, and NZCV
+  before branching to `rt->entry_target`.
+- Cross-fragment fast helpers must not use the full fragment epilogue/prologue
+  pair. Restoring host q8-q15 at a JIT-to-JIT boundary would clobber live guest
+  vector state before the target fragment runs.
 - The fragment-TLB entry stores page tag, valid range, target block, target
-  entry resolver, target spill/reload snippets, and target light-spill snippet.
+  JIT-to-JIT light entry, target spill/reload snippets, and target light-spill
+  snippet.
   It is the second-level fast path between the exact-PC L1 cache and compact
   code-page fragment-list scan.
 

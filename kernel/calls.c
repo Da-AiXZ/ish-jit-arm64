@@ -289,6 +289,9 @@ void handle_interrupt(int interrupt) {
                     (unsigned long long) jit_delta.c_ldst_pair,
                     (unsigned long long) jit_delta.c_ldst_excl,
                     (unsigned long long) jit_delta.c_system);
+            arm64_jit_dispatch_pc_segment_dump(segment_index, syscall_pc, syscall_num,
+                    jit_delta.dispatch_blocks);
+            arm64_jit_dispatch_pc_segment_reset();
         }
 #endif
         ISH_SIGNPOST_SCOPE_END(syscall, "syscall", _sc_spid);
