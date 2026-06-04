@@ -63,7 +63,36 @@
 //   block = 16
 //   spill_state_fn = 24
 //   reload_state_fn = 32
+//   fragment_tlb = 104
+//   fragment_tlb_size = 112
+//   invalidate_gen = 120
 //   light_spill_state_fn = 128
+//   code_page_maps = 136
+//   code_page_map_size = 144
+//   pc_target_cache = 152
+//   pc_target_cache_size = 160
+// arm64_jit_pc_target_cache_entry (64 bytes):
+//   pc = 0
+//   invalidate_gen = 8
+//   block = 16
+//   jit_entry_fn = 24
+//   spill_state_fn = 32
+//   reload_state_fn = 40
+//   light_spill_state_fn = 48
+//   target_host = 56
+// arm64_jit_code_page_map:
+//   page_tag = 0
+//   invalidate_gen = 8
+//   fragments = 16
+// arm64_jit_code_page_fragment (64 bytes):
+//   start_pc = 0
+//   end_pc = 8
+//   block = 16
+//   jit_entry_fn = 24
+//   spill_state_fn = 32
+//   reload_state_fn = 40
+//   light_spill_state_fn = 48
+//   next = 56
 // arm64_jit_fragment_tlb_entry (128 bytes):
 //   page_tag = 0
 //   start_pc = 8
@@ -80,8 +109,8 @@
 //   end_pc = 8
 //   insn_count = 24
 //   insn_pcs = 32
-//   code_rx = 37176
-//   insn_host_offsets = 37220
+//   code_rx = 37192
+//   entry_thunks_offset = 37232
 // cpu_state:
 //   regs = 16
 //   sp = 264
@@ -128,6 +157,153 @@
 .macro JIT_CONTROL_FAST_PROFILE_INC base_offset, kind_reg
 .endm
 #endif
+
+.macro JIT_FRAGMENT_TLB_LOOKUP rt, target, out_entry, scratch0x, scratch0w, scratch1x, scratch1w, miss_label
+    ldr \scratch0x, [\rt, #104]      // rt->fragment_tlb
+    cbz \scratch0x, \miss_label
+    ldr \scratch1x, [\rt, #112]      // rt->fragment_tlb_size
+    cbz \scratch1x, \miss_label
+    lsr \out_entry, \target, #12
+    sub \scratch1x, \scratch1x, #1
+    and \out_entry, \out_entry, \scratch1x
+    add \out_entry, \scratch0x, \out_entry, lsl #8 // 2 ways * 128 bytes
+    // out_entry now points at way0 of the 2-way set.
+.endm
+
+.macro JIT_CODE_PAGE_FRAGMENT_LIST_LOOKUP rt, target, out_frag, scratch0x, scratch0w, scratch1x, scratch1w, miss_label
+    ldr \scratch0x, [\rt, #136]       // rt->code_page_maps
+    cbz \scratch0x, \miss_label
+    ldr \scratch1x, [\rt, #144]       // rt->code_page_map_size
+    cbz \scratch1x, \miss_label
+    tst \target, #3
+    b.ne \miss_label
+    sub \scratch1x, \scratch1x, #1
+    lsr \out_frag, \target, #12
+    and \out_frag, \out_frag, \scratch1x
+    ldr \out_frag, [\scratch0x, \out_frag, lsl #3]
+    cbz \out_frag, \miss_label
+    ldr \scratch0x, [\out_frag]       // map->page_tag
+    lsr \scratch1x, \target, #12
+    cmp \scratch0x, \scratch1x
+    b.ne \miss_label
+    ldr \scratch0w, [\out_frag, #8]   // map->invalidate_gen
+    ldr \scratch1w, [\rt, #120]       // rt->invalidate_gen
+    cmp \scratch0w, \scratch1w
+    b.ne \miss_label
+    ldr \out_frag, [\out_frag, #16]   // map->fragments
+    mov \scratch1w, #32
+999:
+    cbz \out_frag, \miss_label
+    subs \scratch1w, \scratch1w, #1
+    b.mi \miss_label
+    ldr \scratch0x, [\out_frag]       // frag->start_pc
+    cmp \target, \scratch0x
+    b.lo 998f
+    ldr \scratch0x, [\out_frag, #8]   // frag->end_pc
+    cmp \target, \scratch0x
+    b.hs 998f
+    ldr \scratch0x, [\out_frag, #16]  // frag->block
+    cbz \scratch0x, \miss_label
+    ldr \scratch0x, [\out_frag, #24]  // frag->jit_entry_fn
+    cbz \scratch0x, \miss_label
+    b 997f
+998:
+    ldr \out_frag, [\out_frag, #56]   // frag->next
+    b 999b
+997:
+.endm
+
+.macro JIT_PC_TARGET_CACHE_LOOKUP rt, target, out_entry, scratch0x, scratch0w, scratch1x, scratch1w, miss_label
+    ldr \scratch0x, [\rt, #152]       // rt->pc_target_cache
+    cbz \scratch0x, \miss_label
+    ldr \scratch1x, [\rt, #160]       // rt->pc_target_cache_size
+    cbz \scratch1x, \miss_label
+    tst \target, #3
+    b.ne \miss_label
+    sub \scratch1x, \scratch1x, #1
+    lsr \out_entry, \target, #2
+    and \out_entry, \out_entry, \scratch1x
+    add \out_entry, \scratch0x, \out_entry, lsl #6
+    ldr \scratch0x, [\out_entry]      // entry->pc
+    cmp \scratch0x, \target
+    b.ne \miss_label
+    ldr \scratch0w, [\out_entry, #8]  // entry->invalidate_gen
+    ldr \scratch1w, [\rt, #120]       // rt->invalidate_gen
+    cmp \scratch0w, \scratch1w
+    b.ne \miss_label
+    ldr \scratch0x, [\out_entry, #16] // entry->block
+    cbz \scratch0x, \miss_label
+    ldr \scratch1x, [\out_entry, #24] // entry->jit_entry_fn
+    cbz \scratch1x, \miss_label
+    ldr \scratch1x, [\out_entry, #56] // entry->target_host
+    cbz \scratch1x, \miss_label
+.endm
+
+.macro JIT_PC_TARGET_CACHE_FILL rt, target, block, jit_entry, spill_fn, reload_fn, light_spill_fn, target_host, scratch0x, scratch1x
+    ldr \scratch0x, [\rt, #152]       // rt->pc_target_cache
+    cbz \scratch0x, 999f
+    ldr \scratch1x, [\rt, #160]       // rt->pc_target_cache_size
+    cbz \scratch1x, 999f
+    sub \scratch1x, \scratch1x, #1
+    and \scratch1x, \scratch1x, \target, lsr #2
+    add \scratch0x, \scratch0x, \scratch1x, lsl #6
+    str \target, [\scratch0x]
+    ldr \scratch1x, [\rt, #120]       // rt->invalidate_gen
+    str \scratch1x, [\scratch0x, #8]
+    str \block, [\scratch0x, #16]
+    str \jit_entry, [\scratch0x, #24]
+    str \spill_fn, [\scratch0x, #32]
+    str \reload_fn, [\scratch0x, #40]
+    str \light_spill_fn, [\scratch0x, #48]
+    str \target_host, [\scratch0x, #56]
+999:
+.endm
+
+.macro JIT_PC_TARGET_CACHE_FILL_FROM_STACK rt, target_off, block_off, jit_entry_off, spill_off, reload_off, light_spill_off, target_host_off, scratch0x, scratch1x, scratch2x
+    ldr \scratch0x, [\rt, #152]       // rt->pc_target_cache
+    cbz \scratch0x, 999f
+    ldr \scratch1x, [\rt, #160]       // rt->pc_target_cache_size
+    cbz \scratch1x, 999f
+    ldr \scratch2x, [sp, #\target_off]
+    tst \scratch2x, #3
+    b.ne 999f
+    sub \scratch1x, \scratch1x, #1
+    and \scratch1x, \scratch1x, \scratch2x, lsr #2
+    add \scratch0x, \scratch0x, \scratch1x, lsl #6
+    str \scratch2x, [\scratch0x]
+    ldr \scratch1x, [\rt, #120]       // rt->invalidate_gen
+    str \scratch1x, [\scratch0x, #8]
+    ldr \scratch2x, [sp, #\block_off]
+    str \scratch2x, [\scratch0x, #16]
+    ldr \scratch2x, [sp, #\jit_entry_off]
+    str \scratch2x, [\scratch0x, #24]
+    ldr \scratch2x, [sp, #\spill_off]
+    str \scratch2x, [\scratch0x, #32]
+    ldr \scratch2x, [sp, #\reload_off]
+    str \scratch2x, [\scratch0x, #40]
+    ldr \scratch2x, [sp, #\light_spill_off]
+    str \scratch2x, [\scratch0x, #48]
+    ldr \scratch2x, [sp, #\target_host_off]
+    str \scratch2x, [\scratch0x, #56]
+999:
+.endm
+
+.macro JIT_BLOCK_ENTRY_TARGET_FROM_INDEX_OR_FAIL block, index, out, scratchx, scratchw, fail_label
+    mov \scratchx, #0x9170            // block->entry_thunks_offset
+    add \scratchx, \block, \scratchx
+    ldr \scratchw, [\scratchx]
+    cmn \scratchw, #1
+    b.eq \fail_label
+    mov \out, #0x9148                 // block->code_rx
+    ldr \out, [\block, \out]
+    cbz \out, \fail_label
+    add \out, \out, \scratchx
+    add \out, \out, \index, lsl #2
+.endm
+
+.macro JIT_BLOCK_ENTRY_TARGET_FROM_INDEX block, index, out, scratchx, scratchw
+    JIT_BLOCK_ENTRY_TARGET_FROM_INDEX_OR_FAIL \block, \index, \out, \scratchx, \scratchw, 8f
+.endm
 
 .macro JIT_TLB_LOOKUP_READ_HIT guest_addr, out_reg, scratch0, scratch1, miss_label
     eor \scratch0, \guest_addr, \guest_addr, lsr #13
@@ -3952,14 +4128,7 @@ _arm64_jit_helper_control_transfer_fast_jitabi:
     ldr w17, [x16, #24]           // block->insn_count
     cmp x4, x17
     b.hs 8f
-    mov x17, #0x9164              // block->insn_host_offsets
-    add x17, x16, x17
-    ldr w17, [x17, x4, lsl #2]
-    cmn w17, #1
-    b.eq 8f
-    mov x4, #0x9138               // block->code_rx
-    ldr x16, [x16, x4]
-    add x3, x16, x17
+    JIT_BLOCK_ENTRY_TARGET_FROM_INDEX x16, x4, x3, x17, w17
     ldr x2, [sp, #80]
     JIT_CONTROL_FAST_PROFILE_INC 24, x2
     ldr x4, [sp, #72]
@@ -3972,61 +4141,108 @@ _arm64_jit_helper_control_transfer_fast_jitabi:
 
 5:
     ldr x16, [sp, #32]            // rt*
-    ldr x17, [x16, #104]          // rt->fragment_tlb
-    cbz x17, 8f
-    ldr x4, [x16, #112]           // rt->fragment_tlb_size
-    cbz x4, 8f
     ldr x1, [sp, #40]             // target_pc
-    tst x1, #3
-    b.ne 8f
-    ubfx x4, x1, #12, #12
-    add x4, x17, x4, lsl #8       // set base = base + index * 2 ways * 128
-    ldr w17, [x16, #120]          // rt->invalidate_gen
-    lsr x30, x1, #12
-Lcontrol_tlb_way0:
-    ldr w2, [x4, #24]             // entry.invalidate_gen
-    cmp w2, w17
-    b.ne Lcontrol_tlb_way1
-    ldr x2, [x4]                  // entry.page_tag
-    cmp x2, x30
-    b.ne Lcontrol_tlb_way1
-    ldr x2, [x4, #8]              // entry.start_pc
-    cmp x1, x2
-    b.lo Lcontrol_tlb_way1
-    ldr x2, [x4, #16]             // entry.end_pc
-    cmp x1, x2
-    b.lo Lcontrol_tlb_hit
-Lcontrol_tlb_way1:
-    add x4, x4, #128
-    ldr w2, [x4, #24]             // entry.invalidate_gen
-    cmp w2, w17
-    b.ne 8f
-    ldr x2, [x4]                  // entry.page_tag
-    cmp x2, x30
-    b.ne 8f
-    ldr x2, [x4, #8]              // entry.start_pc
-    cmp x1, x2
-    b.lo 8f
-    ldr x2, [x4, #16]             // entry.end_pc
-    cmp x1, x2
-    b.hs 8f
-Lcontrol_tlb_hit:
+    JIT_PC_TARGET_CACHE_LOOKUP x16, x1, x4, x2, w2, x17, w17, Lcontrol_pc_cache_miss
+Lcontrol_pc_cache_hit:
     ldr x2, [sp, #80]
-    JIT_CONTROL_FAST_PROFILE_INC 56, x2
-    ldr x16, [x4, #32]            // entry.block
+    JIT_CONTROL_FAST_PROFILE_INC 1400, x2
+    ldr x16, [x4, #16]            // entry.block
     cbz x16, 8f
-    ldr x17, [x4, #40]            // entry.jit_entry_fn
+    ldr x17, [x4, #24]            // entry.jit_entry_fn
     cbz x17, 8f
     str x16, [sp, #48]
     str x17, [sp, #88]
-    ldr x16, [x4, #48]            // entry.spill_state_fn
+    ldr x16, [x4, #32]            // entry.spill_state_fn
     str x16, [sp, #112]
-    ldr x16, [x4, #56]            // entry.reload_state_fn
+    ldr x16, [x4, #40]            // entry.reload_state_fn
     str x16, [sp, #120]
-    ldr x16, [x4, #64]            // entry.light_spill_state_fn
+    ldr x16, [x4, #48]            // entry.light_spill_state_fn
     str x16, [sp, #96]
-    ldr x16, [sp, #40]            // original target_pc
+    ldr x16, [x4, #56]            // entry.target_host
     str x16, [sp, #104]
+    b Lcontrol_cross_fragment_hit
+Lcontrol_pc_cache_miss:
+    JIT_FRAGMENT_TLB_LOOKUP x16, x1, x4, x2, w2, x17, w17, Lcontrol_l2_miss
+    mov x2, #2
+Lcontrol_l2_way_loop:
+    cbz x2, Lcontrol_l2_miss
+    ldr x17, [x4]                 // entry->page_tag
+    lsr x3, x1, #12
+    cmp x17, x3
+    b.ne Lcontrol_l2_next
+    ldr w17, [x4, #24]            // entry->invalidate_gen
+    ldr w3, [x16, #120]           // rt->invalidate_gen
+    cmp w17, w3
+    b.ne Lcontrol_l2_next
+    ldr x17, [x4, #8]             // entry->start_pc
+    cmp x1, x17
+    b.lo Lcontrol_l2_next
+    ldr x17, [x4, #16]            // entry->end_pc
+    cmp x1, x17
+    b.hs Lcontrol_l2_next
+    ldr x3, [x4, #32]             // entry.block
+    cbz x3, 8f
+    ldr x17, [x4, #40]            // entry.jit_entry_fn
+    cbz x17, 8f
+    str x3, [sp, #48]
+    str x17, [sp, #88]
+    ldr x17, [x4, #48]
+    str x17, [sp, #112]
+    ldr x17, [x4, #56]
+    str x17, [sp, #120]
+    ldr x17, [x4, #64]
+    str x17, [sp, #96]
+    tst x1, #3
+    b.ne 8f
+    ldr x4, [x3]                  // block->start_pc
+    sub x2, x1, x4
+    lsr x2, x2, #2
+    ldr w4, [x3, #24]             // block->insn_count
+    cmp x2, x4
+    b.hs 8f
+    JIT_BLOCK_ENTRY_TARGET_FROM_INDEX x3, x2, x17, x4, w4
+    str x17, [sp, #104]
+    ldr x16, [sp, #32]
+    JIT_PC_TARGET_CACHE_FILL_FROM_STACK x16, 40, 48, 88, 112, 120, 96, 104, x2, x4, x17
+    ldr x2, [sp, #80]
+    JIT_CONTROL_FAST_PROFILE_INC 56, x2
+    b Lcontrol_cross_fragment_hit
+Lcontrol_l2_next:
+    add x4, x4, #128
+    sub x2, x2, #1
+    b Lcontrol_l2_way_loop
+Lcontrol_l2_miss:
+    ldr x16, [sp, #32]            // rt*
+    ldr x1, [sp, #40]             // target_pc
+    JIT_CODE_PAGE_FRAGMENT_LIST_LOOKUP x16, x1, x4, x2, w2, x17, w17, 8f
+Lcontrol_page_map_hit:
+    ldr x2, [sp, #80]
+    JIT_CONTROL_FAST_PROFILE_INC 1432, x2
+    ldr x3, [x4, #16]             // frag.block
+    cbz x3, 8f
+    ldr x17, [x4, #24]            // frag.jit_entry_fn
+    cbz x17, 8f
+    str x3, [sp, #48]
+    str x17, [sp, #88]
+    ldr x17, [x4, #32]
+    str x17, [sp, #112]
+    ldr x17, [x4, #40]
+    str x17, [sp, #120]
+    ldr x17, [x4, #48]
+    str x17, [sp, #96]
+    tst x1, #3
+    b.ne 8f
+    ldr x4, [x3]                  // block->start_pc
+    sub x2, x1, x4
+    lsr x2, x2, #2
+    ldr w4, [x3, #24]             // block->insn_count
+    cmp x2, x4
+    b.hs 8f
+    JIT_BLOCK_ENTRY_TARGET_FROM_INDEX x3, x2, x17, x4, w4
+    str x17, [sp, #104]
+    ldr x16, [sp, #32]
+    JIT_PC_TARGET_CACHE_FILL_FROM_STACK x16, 40, 48, 88, 112, 120, 96, 104, x2, x4, x17
+Lcontrol_cross_fragment_hit:
     ldr x0, [sp, #32]             // rt*
     ldr x4, [sp, #72]
     msr nzcv, x4
@@ -4042,11 +4258,11 @@ Lcontrol_tlb_hit:
     str x1, [x0, #32]
     ldr x1, [sp, #48]             // target block
     str x1, [x0, #16]
-    ldr x1, [sp, #88]             // target entry
-    str x1, [x0, #96]
+    ldr x1, [sp, #104]            // exact target host address
+    str x1, [x0, #96]             // rt->entry_target
     ldr x16, [sp, #96]            // target light spill
     str x16, [x0, #128]
-    ldr x1, [sp, #104]            // target_pc
+    ldr x1, [sp, #40]             // target_pc
     ldr x17, [sp, #88]
     ldr x16, [sp, #16]
     ldp x29, x30, [sp], #128
@@ -4117,14 +4333,7 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
     ldr w17, [x16, #24]         // block->insn_count
     cmp x4, x17
     b.hs 2f
-    mov x17, #0x9164            // block->insn_host_offsets
-    add x17, x16, x17
-    ldr w17, [x17, x4, lsl #2]
-    cmn w17, #1                 // UINT32_MAX is invalid
-    b.eq 2f
-    mov x4, #0x9138             // block->code_rx
-    ldr x16, [x16, x4]
-    add x3, x16, x17
+    JIT_BLOCK_ENTRY_TARGET_FROM_INDEX_OR_FAIL x16, x4, x3, x17, w17, 2f
     JIT_BRANCH_FAST_PROFILE_INC 0
     ldr x4, [sp, #72]
     msr nzcv, x4
@@ -4137,44 +4346,34 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
 
 5:
     ldr x16, [sp, #32]            // rt*
-    ldr x17, [x16, #104]          // rt->fragment_tlb
+    JIT_PC_TARGET_CACHE_LOOKUP x16, x3, x4, x2, w2, x17, w17, Lbranch_pc_cache_miss
+Lbranch_pc_cache_hit:
+    str xzr, [sp, #96]            // non-BLR paths do not publish LR.
+    ldr x30, [sp, #48]            // original insn
+    ubfx x30, x30, #21, #4
+    cmp x30, #1                   // BLR publishes LR after source light spill.
+    b.ne Lbranch_pc_cache_publish_done
+    ldr x30, [sp, #40]            // original guest_pc
+    add x30, x30, #4
+    str x30, [sp, #96]
+Lbranch_pc_cache_publish_done:
+    JIT_BRANCH_FAST_PROFILE_INC 1384
+    ldr x16, [x4, #16]            // entry.block
+    cbz x16, 6f
+    ldr x17, [x4, #24]            // entry.jit_entry_fn
     cbz x17, 6f
-    ldr x4, [x16, #112]           // rt->fragment_tlb_size
-    cbz x4, 6f
-    tst x3, #3
-    b.ne 6f
-    ubfx x4, x3, #12, #12
-    add x4, x17, x4, lsl #8       // set base = base + index * 2 ways * 128
-    ldr w17, [x16, #120]          // rt->invalidate_gen
-    lsr x30, x3, #12
-Lbranch_tlb_way0:
-    ldr w2, [x4, #24]             // entry.invalidate_gen
-    cmp w2, w17
-    b.ne Lbranch_tlb_way1
-    ldr x2, [x4]                  // entry.page_tag
-    cmp x2, x30
-    b.ne Lbranch_tlb_way1
-    ldr x2, [x4, #8]              // entry.start_pc
-    cmp x3, x2
-    b.lo Lbranch_tlb_way1
-    ldr x2, [x4, #16]             // entry.end_pc
-    cmp x3, x2
-    b.lo Lbranch_tlb_hit
-Lbranch_tlb_way1:
-    add x4, x4, #128
-    ldr w2, [x4, #24]             // entry.invalidate_gen
-    cmp w2, w17
-    b.ne 6f
-    ldr x2, [x4]                  // entry.page_tag
-    cmp x2, x30
-    b.ne 6f
-    ldr x2, [x4, #8]              // entry.start_pc
-    cmp x3, x2
-    b.lo 6f
-    ldr x2, [x4, #16]             // entry.end_pc
-    cmp x3, x2
-    b.hs 6f
-Lbranch_tlb_hit:
+    str x16, [sp, #48]
+    str x17, [sp, #88]
+    ldr x16, [x4, #32]            // entry.spill_state_fn
+    str x16, [sp, #40]
+    ldr x16, [x4, #40]            // entry.reload_state_fn
+    str x16, [sp, #24]
+    ldr x16, [x4, #48]            // entry.light_spill_state_fn
+    str x16, [sp, #80]
+    ldr x16, [x4, #56]            // entry.target_host
+    str x16, [sp, #104]
+    b Lbranch_cross_fragment_hit
+Lbranch_pc_cache_miss:
     str xzr, [sp, #96]            // non-BLR paths do not publish LR.
     ldr x30, [sp, #48]            // original insn
     ubfx x30, x30, #21, #4
@@ -4184,6 +4383,26 @@ Lbranch_tlb_hit:
     add x30, x30, #4
     str x30, [sp, #96]
 7:
+    ldr x16, [sp, #32]            // rt*
+    ldr x3, [sp, #56]             // target_pc
+    JIT_FRAGMENT_TLB_LOOKUP x16, x3, x4, x2, w2, x17, w17, Lbranch_l2_miss
+    mov x2, #2
+Lbranch_l2_way_loop:
+    cbz x2, Lbranch_l2_miss
+    ldr x17, [x4]                 // entry->page_tag
+    lsr x30, x3, #12
+    cmp x17, x30
+    b.ne Lbranch_l2_next
+    ldr w17, [x4, #24]            // entry->invalidate_gen
+    ldr w30, [x16, #120]          // rt->invalidate_gen
+    cmp w17, w30
+    b.ne Lbranch_l2_next
+    ldr x17, [x4, #8]             // entry->start_pc
+    cmp x3, x17
+    b.lo Lbranch_l2_next
+    ldr x17, [x4, #16]            // entry->end_pc
+    cmp x3, x17
+    b.hs Lbranch_l2_next
     JIT_BRANCH_FAST_PROFILE_INC 8
     ldr x16, [x4, #32]            // entry.block
     cbz x16, 6f
@@ -4197,6 +4416,56 @@ Lbranch_tlb_hit:
     str x16, [sp, #24]
     ldr x16, [x4, #64]            // entry.light_spill_state_fn
     str x16, [sp, #80]
+    ldr x16, [sp, #48]
+    tst x3, #3
+    b.ne 6f
+    ldr x4, [x16]                 // block->start_pc
+    sub x2, x3, x4
+    lsr x2, x2, #2
+    ldr w4, [x16, #24]            // block->insn_count
+    cmp x2, x4
+    b.hs 6f
+    JIT_BLOCK_ENTRY_TARGET_FROM_INDEX_OR_FAIL x16, x2, x17, x4, w4, 6f
+    str x17, [sp, #104]
+    ldr x16, [sp, #32]
+    JIT_PC_TARGET_CACHE_FILL_FROM_STACK x16, 56, 48, 88, 40, 24, 80, 104, x2, x4, x17
+    b Lbranch_cross_fragment_hit
+Lbranch_l2_next:
+    add x4, x4, #128
+    sub x2, x2, #1
+    b Lbranch_l2_way_loop
+Lbranch_l2_miss:
+    ldr x16, [sp, #32]            // rt*
+    ldr x3, [sp, #56]             // target_pc
+    JIT_CODE_PAGE_FRAGMENT_LIST_LOOKUP x16, x3, x4, x2, w2, x17, w17, 6f
+Lbranch_page_map_hit:
+    JIT_BRANCH_FAST_PROFILE_INC 1392
+    ldr x16, [x4, #16]            // frag.block
+    cbz x16, 6f
+    ldr x17, [x4, #24]            // frag.jit_entry_fn
+    cbz x17, 6f
+    str x16, [sp, #48]
+    str x17, [sp, #88]
+    ldr x16, [x4, #32]            // frag.spill_state_fn
+    str x16, [sp, #40]
+    ldr x16, [x4, #40]            // frag.reload_state_fn
+    str x16, [sp, #24]
+    ldr x16, [x4, #48]            // frag.light_spill_state_fn
+    str x16, [sp, #80]
+    ldr x16, [sp, #48]
+    tst x3, #3
+    b.ne 6f
+    ldr x4, [x16]                 // block->start_pc
+    sub x2, x3, x4
+    lsr x2, x2, #2
+    ldr w4, [x16, #24]            // block->insn_count
+    cmp x2, x4
+    b.hs 6f
+    JIT_BLOCK_ENTRY_TARGET_FROM_INDEX_OR_FAIL x16, x2, x17, x4, w4, 6f
+    str x17, [sp, #104]
+    ldr x16, [sp, #32]
+    JIT_PC_TARGET_CACHE_FILL_FROM_STACK x16, 56, 48, 88, 40, 24, 80, 104, x2, x4, x17
+Lbranch_cross_fragment_hit:
     ldr x0, [sp, #32]             // rt*
     ldr x4, [sp, #72]
     msr nzcv, x4
@@ -4215,7 +4484,8 @@ Lbranch_tlb_hit:
     ldr x16, [sp, #48]            // entry.block
     ldr x17, [sp, #88]            // entry.jit_entry_fn
     str x16, [x0, #16]            // rt->block
-    str x17, [x0, #96]            // rt->entry_target
+    ldr x16, [sp, #104]           // exact target host address
+    str x16, [x0, #96]            // rt->entry_target
     ldr x16, [sp, #40]
     str x16, [x0, #24]            // rt->spill_state_fn
     ldr x16, [sp, #24]

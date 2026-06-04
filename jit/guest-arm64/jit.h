@@ -22,6 +22,9 @@
 #define ARM64_JIT_ENTRY_CACHE_SIZE (1 << 12)
 #define ARM64_JIT_FRAGMENT_TLB_SIZE (1 << 12)
 #define ARM64_JIT_FRAGMENT_TLB_WAYS 2
+#define ARM64_JIT_CODE_PAGE_MAP_SIZE (1 << 12)
+#define ARM64_JIT_PC_TARGET_CACHE_SIZE 256
+#define ARM64_JIT_CODE_PAGE_FAST_SCAN_LIMIT 32
 #define ARM64_JIT_MAX_INSNS 1024
 #define ARM64_JIT_MAX_PC_MAP 2048
 #define ARM64_JIT_MAX_FIXUPS 2048
@@ -115,6 +118,7 @@ struct arm64_jit_block {
     struct arm64_jit_guest_reg_map gpr_map;
     struct list hash_chain;
     struct list page[2];
+    struct arm64_jit_code_page_fragment *code_page_fragments[2];
     struct list jetsam;
     struct list entrypoints;
     uint8_t *code_rw;
@@ -173,6 +177,35 @@ struct arm64_jit_fragment_tlb_entry {
     void *reserved[6];
 };
 
+struct arm64_jit_code_page_fragment {
+    addr_t start_pc;
+    addr_t end_pc;
+    struct arm64_jit_block *block;
+    void *jit_entry_fn;
+    void *spill_state_fn;
+    void *reload_state_fn;
+    void *light_spill_state_fn;
+    struct arm64_jit_code_page_fragment *next;
+};
+
+struct arm64_jit_code_page_map {
+    page_t page_tag;
+    unsigned invalidate_gen;
+    uint32_t reserved;
+    struct arm64_jit_code_page_fragment *fragments;
+};
+struct arm64_jit_pc_target_cache_entry {
+    addr_t pc;
+    unsigned invalidate_gen;
+    uint32_t reserved;
+    struct arm64_jit_block *block;
+    void *jit_entry_fn;
+    void *spill_state_fn;
+    void *reload_state_fn;
+    void *light_spill_state_fn;
+    void *target_host;
+};
+
 struct arm64_jit_state {
     struct mmu *mmu;
     struct list *hash;
@@ -183,6 +216,10 @@ struct arm64_jit_state {
     size_t entry_cache_size;
     struct arm64_jit_fragment_tlb_entry *fragment_tlb;
     size_t fragment_tlb_size;
+    struct arm64_jit_code_page_map **code_page_maps;
+    size_t code_page_map_size;
+    struct arm64_jit_pc_target_cache_entry *pc_target_cache;
+    size_t pc_target_cache_size;
     struct arm64_jit_page_bucket *page_hash;
     struct list jetsam;
     lock_t lock;
@@ -209,6 +246,10 @@ struct arm64_jit_runtime {
     size_t fragment_tlb_size;
     unsigned invalidate_gen;
     void (*light_spill_state_fn)(struct arm64_jit_runtime *rt);
+    struct arm64_jit_code_page_map **code_page_maps;
+    size_t code_page_map_size;
+    struct arm64_jit_pc_target_cache_entry *pc_target_cache;
+    size_t pc_target_cache_size;
 };
 
 struct arm64_jit_tlb_profile {
@@ -259,6 +300,14 @@ struct arm64_jit_branch_fast_profile {
     _Atomic uint64_t control_miss_reasons[4][6];
     _Atomic uint64_t same_page_range_pages[64];
     _Atomic uint64_t same_page_range_page_counts[64];
+    _Atomic uint64_t pc_target_hits;
+    _Atomic uint64_t page_map_hits;
+    _Atomic uint64_t control_pc_target_hits[4];
+    _Atomic uint64_t control_page_map_hits[4];
+    _Atomic uint64_t pc_target_miss_reasons[6];
+    _Atomic uint64_t pc_target_overwrite_indices[ARM64_JIT_PC_TARGET_CACHE_SIZE];
+    _Atomic uint64_t pc_target_overwrite_old_pcs[ARM64_JIT_PC_TARGET_CACHE_SIZE];
+    _Atomic uint64_t pc_target_overwrite_new_pcs[ARM64_JIT_PC_TARGET_CACHE_SIZE];
 };
 
 extern struct arm64_jit_branch_fast_profile g_arm64_jit_branch_fast_profile;
@@ -294,6 +343,7 @@ static inline struct list *arm64_jit_blocks_list(struct arm64_jit_state *state, 
 
 struct arm64_jit_state *arm64_jit_state_for_mmu(struct mmu *mmu);
 void arm64_jit_invalidate_page(struct mmu *mmu, page_t page);
+void arm64_jit_destroy_mmu(struct mmu *mmu);
 int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb);
 
 int arm64_jit_trace_mode(void);

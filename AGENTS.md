@@ -294,11 +294,15 @@ Each `[syscall-segment]` line reports:
 The helper-family deltas only become nonzero when
 `ISH_ARM64_JIT_HELPER_PROFILE=1` is enabled.
 
-With `arm64_jit_perf_counters=true`, helper-profile output also includes:
+With `arm64_jit_perf_counters=true`, helper-profile output also includes branch
+fast counters:
 
 - `branch_fast same_fragment/fragment_tlb/misses` for `BR`/`BLR`/`RET`
 - `control_fast dispatch/b_cond/cbz/tbz=same_fragment/fragment_tlb/misses`
   for fixed-target and conditional control transfers
+
+The `fragment_tlb` field reports the second-level 2-way range cache. More
+detailed `*_l1` lines split exact-PC L1 hits from compact code-page-list hits.
 
 ### Fragment-Per-Page Profiling
 
@@ -475,10 +479,37 @@ Current indexed scalar-pair rule:
 
 ## Current Fragment Lookup Direction
 
-Runtime dispatch now has a direct-mapped PC-to-entry cache in
-`arm64_jit_state`, keyed from `pc >> 2`, with entries guarded by
-`invalidate_gen`. The slow covering-block fallback uses the existing per-guest
-page block lists instead of scanning every block hash bucket.
+Runtime dispatch and JIT-to-JIT cross-fragment transfers now first probe a
+compact direct-mapped exact-PC target cache, then a 2-way range fragment TLB,
+then a compact per-code-page fragment list. The PC target cache has 256 entries;
+each entry is 64 bytes, so the whole first-level cache is 16 KiB. It is indexed
+by `(pc >> 2) & 255`, exact-PC checked, and `invalidate_gen` guarded. It is
+demand-filled after an actual lower-level lookup. Do not preload every
+instruction in a published fragment into this cache; that pollutes the
+first-level cache and causes massive self-eviction.
+
+`arm64_jit_state` also owns a direct-mapped array of lazily allocated code-page
+maps. Each code-page map stores a linked list of fragments that overlap the
+guest code page. A fragment-list node records:
+
+- guest PC range
+- owning JIT block
+- target fragment entry, spill, reload, and light-spill snippets
+
+The helper computes `index = (pc - block->start_pc) >> 2`, then targets the
+fragment-local dispatch-table slot at
+`block->code_rx + block->entry_thunks_offset + index * 4`. Each slot is a host
+`b` to the corresponding emitted guest-instruction body. This stores the
+per-instruction target offset in icache instead of loading
+`insn_host_offsets[index]` from dcache on hot JIT-to-JIT transfers.
+`insn_host_offsets[]` remains emitter/debug metadata for local branch patching,
+dumps, and C-side validity checks. The list scan is bounded by
+`ARM64_JIT_CODE_PAGE_FAST_SCAN_LIMIT`; failures fall back to the slow C helper.
+
+The old exact entry hash/cache and per-page block-list scan remain as C-side
+fallbacks. The old fragment TLB data structure is now the second-level fast
+range cache again, populated when fragments are published and probed by the
+JITABI fast helpers before the compact code-page fragment list.
 
 Important invariants for future JIT-to-JIT transfer work:
 
@@ -487,13 +518,20 @@ Important invariants for future JIT-to-JIT transfer work:
 - Guest page invalidation marks affected blocks jetsam and increments
   `invalidate_gen`; fast caches must either check that generation or be cleared
   under the same invalidation path.
-- Superseding an older contained block also bumps `invalidate_gen`, because the
-  JIT-side fragment TLB only has the generation guard and cannot cheaply test
-  `block->is_jetsam` before jumping.
+- Superseding an older contained block also bumps `invalidate_gen`; compact
+  page-map fragment nodes are removed by exact block ownership so removing an
+  older block cannot erase a newer fragment.
+- Direct-mapped code-page-map slot collisions free the old fragment list and
+  bump `invalidate_gen`, which invalidates stale L1/L2 fast-cache entries.
 - Page-list membership uses `end_pc - 1` because fragment `end_pc` is exclusive.
-- Same-fragment jumps should use fragment-local guest PC to host offset mapping.
-  Cross-fragment jumps must account for different cached-register maps before
-  branching into the destination body.
+- Same-fragment jumps use fragment-local guest PC to host offset mapping.
+  Cross-fragment jumps use the PC target cache first, then the 2-way fragment
+  TLB, then the compact code-page fragment list to resolve the target block and
+  exact dispatch-table slot, then light-spill source cached registers, update
+  the runtime block/spill/reload/light-spill state, and enter the target
+  fragment shared entry. Fast-cache metadata must advertise the target
+  fragment shared-entry snippet, not the target resolver snippet, because the
+  fast path has already resolved `rt->entry_target`.
 - Non-self local backward branches may stay inside fragments for performance.
   Exact self-branches route through the helper path. If the local-fixup table is
   full, the emitter must fall back to the helper path instead of emitting an
@@ -510,36 +548,36 @@ Important invariants for future JIT-to-JIT transfer work:
   `ARM64_JIT_MAX_INSNS` and the combined analyzed GPR-use mask does not exceed
   `ARM64_JIT_MAX_ALLOCATABLE_GPRS`.
 
-### Fragment TLB Probe State
+### Code-Page Map Probe State
 
-Fragment-TLB allocation, population, runtime exposure to JIT helpers, and
-cross-fragment branch-register handoff through
-`_arm64_jit_helper_branch_reg_fast_jitabi` are default-enabled.
-The helper handles:
+Mixed-cache allocation, population, runtime exposure to JIT helpers, and
+cross-fragment handoff through `_arm64_jit_helper_branch_reg_fast_jitabi` and
+`_arm64_jit_helper_control_transfer_fast_jitabi` are default-enabled.
+The helpers handle:
 
 - same-fragment `BR`/`RET` by branching directly to the current fragment body.
   Same-fragment `BLR` is still routed through the fragment-entry path until LR
   publication has a safe dedicated ABI.
-- cross-fragment `BR`/`BLR`/`RET` by probing the fragment TLB, light-spilling
-  source cached state, updating runtime block/spill/reload/light-spill state,
-  then entering the target fragment resolver
+- cross-fragment control transfer by probing L1 exact-PC cache, L2 2-way
+  fragment TLB, and L3 compact code-page fragment list, light-spilling source
+  cached state, updating runtime block/spill/reload/light-spill state and
+  `rt->entry_target`, then entering the target fragment shared entry
 - miss/failure by restoring touched JIT state, full-spilling source state, and
   falling back to the normal C branch-register helper
 
 Important lessons from the direct-handoff probe:
 
 - Fragments are expected to be contiguous 4-byte guest instruction ranges. The
-  target fragment entry resolver relies on that invariant and computes
-  `index = (target_pc - block->start_pc) >> 2` before indexing
-  `insn_host_offsets[]`. Do not switch this to a linear `insn_pcs[]` search
-  unless fragment layout becomes non-contiguous.
+  fallback target fragment entry resolver relies on that invariant and computes
+  `index = (target_pc - block->start_pc) >> 2` before selecting the dispatch
+  table slot. Do not switch this to a linear `insn_pcs[]` search unless
+  fragment layout becomes non-contiguous.
 - The same-fragment branch-register fast helper uses the same contiguous
   fragment invariant for O(1) target lookup. Keep it aligned with the entry
   resolver if the fragment layout invariant changes.
 - C-side runtime fallback lookup also uses the contiguous fragment invariant in
   `arm64_jit_find_insn_index()`. Per-page block-list scans remain acceptable as
-  a slow fallback because code pages should have only a small number of
-  fragments.
+  a slow fallback, but the hot path should hit the code-page instruction map.
 - A naive same-fragment `BLR` helper-local LR publication attempt made
   `/sbin/apk stats` exit successfully with empty stdout. Do not reintroduce that
   shape; it needs a dedicated ABI that can update live cached LR without
@@ -560,7 +598,8 @@ Important lessons from the direct-handoff probe:
   may dirty host FP/SIMD state.
 - The fragment-TLB entry stores page tag, valid range, target block, target
   entry resolver, target spill/reload snippets, and target light-spill snippet.
-  The assembly probe assumes the entry size is 128 bytes.
+  It is the second-level fast path between the exact-PC L1 cache and compact
+  code-page fragment-list scan.
 
 Branch-fast counters are included in helper profile output:
 
@@ -575,8 +614,16 @@ timeout 30s env ISH_ARM64_BACKEND=arm64_jit \
 The `branch_fast` line reports:
 
 - `same_fragment`: direct same-fragment `BR`/`RET` hits
-- `fragment_tlb`: fragment-TLB cross-fragment handoff hits
+- `fragment_tlb`: second-level 2-way range-fragment cache hits
 - `misses`: fallback to the C branch-register helper
+
+The `branch_fast_l1` and `control_fast_l1` lines split cross-fragment fast hits
+between the first-level PC target cache and the compact code-page fragment-list
+lookup. The `fragment_tlb` counter is reported separately. When diagnosing the
+PC cache, compare `pc_target` against `page_map` and inspect
+`pc_target_cache_overwrite_top*`. High overwrite concentration at a handful of
+indices indicates direct-mapped conflict churn; high overwrite volume across
+many indices can indicate accidental bulk preloading.
 
 These counters are useful for diagnosis but add writes on fast paths, so do not
 enable `arm64_jit_perf_counters` or use profile timings as benchmark timings

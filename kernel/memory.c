@@ -19,6 +19,9 @@
 #include "kernel/resource.h"
 #include "fs/fd.h"
 #include "emu/cpu.h"
+#if defined(GUEST_ARM64) && defined(__aarch64__)
+#include "jit/guest-arm64/jit.h"
+#endif
 
 // increment the change count
 static void mem_changed(struct mem *mem);
@@ -75,6 +78,9 @@ static void pt_node_free(void *node, int level) {
 
 void mem_destroy(struct mem *mem) {
     write_wrlock(&mem->lock);
+#if defined(GUEST_ARM64) && defined(__aarch64__)
+    arm64_jit_destroy_mmu(&mem->mmu);
+#endif
     pt_unmap_always(mem, 0, MEM_PAGES);
     while (mem->reservations) {
         struct mem_reservation *r = mem->reservations;
