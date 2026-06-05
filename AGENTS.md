@@ -679,6 +679,19 @@ Important invariants for future JIT-to-JIT transfer work:
   the written page actually owns live compiled code. Do not reintroduce a global
   generation bump for ordinary data writes; it poisons PC target/code-page-map
   fast caches without indicating self-modifying code.
+- JIT code memory is allocated through compile-only slabs. A slab is writable
+  only while the current compile batch is emitting, then `mprotect`ed RX once
+  and sealed; sealed slabs must never be made writable again. Each block still
+  owns its metadata and invalidates independently; a slab is unmapped only when
+  all blocks allocated from it have been discarded. Helper-profile output
+  distinguishes per-block requested `code_map_bytes` from actual reserved
+  `code_slab_bytes` and `code_slabs`.
+- Compile misses batch multiple forward fragments into compile-only slabs until
+  the estimated code bytes fill the next host page by about 80%, the scan hits a
+  likely function/code boundary, or the batch size limits are reached. If an
+  active slab lacks room for a later block because real emission exceeded the
+  dry-run estimate, allocation starts another writable slab in the same batch;
+  batch finish seals all unsealed slabs.
 - Already compiled block starts are also not absolute hard stops when the new
   fragment can safely merge and later supersede the contained block. A merge is
   safe when the combined contiguous range still fits `ARM64_JIT_MAX_INSNS`.

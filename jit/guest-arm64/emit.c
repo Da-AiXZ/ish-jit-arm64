@@ -1,9 +1,6 @@
 #if defined(GUEST_ARM64) && defined(__aarch64__)
 
-#include <errno.h>
 #include <stddef.h>
-#include <sys/mman.h>
-#include <unistd.h>
 
 #include "jit/guest-arm64/jit.h"
 
@@ -3197,10 +3194,7 @@ static void arm64_jit_reset_emit_metadata(struct arm64_jit_block *block) {
     block->light_spill_state_fn = NULL;
     block->c_entry_fn = NULL;
     block->jit_entry_fn = NULL;
-    block->code_rw = NULL;
-    block->code_rx = NULL;
     block->code_size = 0;
-    block->code_map_size = 0;
     block->pc_map_count = 0;
     block->verify_site_count = 0;
     block->fixup_count = 0;
@@ -3292,39 +3286,15 @@ static bool arm64_jit_emit_block_contents(struct arm64_jit_emitter *e) {
     return true;
 }
 
-static size_t arm64_jit_host_page_size(void) {
-    static size_t cached_page_size;
-    if (cached_page_size != 0)
-        return cached_page_size;
-    long page_size = sysconf(_SC_PAGESIZE);
-    cached_page_size = page_size > 0 ? (size_t) page_size : 16384;
-    return cached_page_size;
-}
-
-static size_t arm64_jit_round_up_size(size_t value, size_t align) {
-    if (align == 0)
-        return value;
-    size_t rem = value % align;
-    if (rem == 0)
-        return value;
-    return value + align - rem;
-}
-
 static size_t arm64_jit_code_cap_for_estimate(size_t estimate) {
     const size_t slack = 1024;
-    size_t page_size = arm64_jit_host_page_size();
     if (estimate > SIZE_MAX - slack)
         return 0;
-    size_t cap = arm64_jit_round_up_size(estimate + slack, page_size);
-    if (cap < page_size)
-        cap = page_size;
-    return cap;
+    return estimate + slack;
 }
 
-void arm64_jit_emit_block(struct arm64_jit_state *state, struct arm64_jit_block *block) {
-    size_t min_cap = 0;
-
-retry_without_local_fixups:
+size_t arm64_jit_estimate_block_code_size(struct arm64_jit_state *state,
+        struct arm64_jit_block *block) {
     arm64_jit_reset_emit_metadata(block);
     struct arm64_jit_emitter dry = {
         .state = state,
@@ -3338,10 +3308,19 @@ retry_without_local_fixups:
     if (!arm64_jit_emit_block_contents(&dry) || dry.overflowed ||
             dry.size > UINT32_MAX) {
         arm64_jit_reset_emit_metadata(block);
-        return;
+        return 0;
     }
+    arm64_jit_reset_emit_metadata(block);
+    return arm64_jit_code_cap_for_estimate(dry.size);
+}
 
-    size_t cap = arm64_jit_code_cap_for_estimate(dry.size);
+void arm64_jit_emit_block(struct arm64_jit_state *state, struct arm64_jit_block *block) {
+    size_t min_cap = 0;
+    size_t cap = 0;
+    arm64_jit_free_code(block);
+
+retry_without_local_fixups:
+    cap = arm64_jit_estimate_block_code_size(state, block);
     if (cap == 0 || cap > UINT32_MAX) {
         arm64_jit_reset_emit_metadata(block);
         return;
@@ -3351,8 +3330,8 @@ retry_without_local_fixups:
 
 retry_with_current_cap:
     arm64_jit_reset_emit_metadata(block);
-    uint8_t *buf = mmap(NULL, cap, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (buf == MAP_FAILED)
+    uint8_t *buf = NULL;
+    if (!arm64_jit_alloc_code(state, block, cap, &buf))
         return;
 
     struct arm64_jit_emitter e = {
@@ -3366,7 +3345,7 @@ retry_with_current_cap:
     };
 
     if (!arm64_jit_emit_block_contents(&e)) {
-        munmap(buf, cap);
+        arm64_jit_free_code(block);
         goto retry_without_local_fixups;
     }
 
@@ -3375,7 +3354,7 @@ retry_with_current_cap:
             fprintf(stderr, "[arm64-jit] emit retry: buffer overflow start=0x%llx cap=%zu size=%zu\n",
                     (unsigned long long) block->start_pc, cap, e.size);
         }
-        munmap(buf, cap);
+        arm64_jit_free_code(block);
         if (cap > SIZE_MAX / 2 || cap > UINT32_MAX / 2) {
             arm64_jit_reset_emit_metadata(block);
             return;
@@ -3385,22 +3364,20 @@ retry_with_current_cap:
         goto retry_with_current_cap;
     }
 
-    if (mprotect(buf, cap, PROT_READ | PROT_EXEC) != 0) {
+    block->code_size = (uint32_t) e.size;
+    if (!arm64_jit_protect_code(block)) {
         if (arm64_jit_trace_mode()) {
-            fprintf(stderr, "[arm64-jit] emit abort: mprotect failed start=0x%llx size=%zu errno=%d\n",
-                    (unsigned long long) block->start_pc, e.size, errno);
+            fprintf(stderr, "[arm64-jit] emit abort: protect failed start=0x%llx size=%zu\n",
+                    (unsigned long long) block->start_pc, e.size);
         }
-        munmap(buf, cap);
+        arm64_jit_free_code(block);
         return;
     }
+
     if (arm64_jit_trace_mode()) {
         fprintf(stderr, "[arm64-jit] emitted start=0x%llx size=%zu\n",
                 (unsigned long long) block->start_pc, e.size);
     }
-    block->code_rw = buf;
-    block->code_rx = buf;
-    block->code_size = (uint32_t) e.size;
-    block->code_map_size = (uint32_t) cap;
 }
 
 #endif

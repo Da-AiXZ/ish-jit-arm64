@@ -98,6 +98,7 @@ struct arm64_jit_verify_site {
 };
 
 struct arm64_jit_block;
+struct arm64_jit_code_slab;
 
 struct arm64_jit_page_bucket {
     struct list blocks[2];
@@ -145,6 +146,8 @@ struct arm64_jit_block {
     addr_t disabled_local_fixup_pcs[ARM64_JIT_MAX_FIXUPS];
     void *light_spill_state_fn;
     uint32_t light_spill_code_offset;
+    struct arm64_jit_code_slab *code_slab;
+    uint32_t code_slab_offset;
 };
 
 struct arm64_jit_entrypoint {
@@ -221,9 +224,12 @@ struct arm64_jit_state {
     size_t pc_target_cache_size;
     struct arm64_jit_page_bucket *page_hash;
     struct list jetsam;
+    struct list code_slabs;
+    struct arm64_jit_code_slab *active_code_slab;
     lock_t lock;
     wrlock_t jetsam_lock;
     unsigned invalidate_gen;
+    bool code_batch_active;
     uint64_t fragment_tlb_insert_serial;
 };
 
@@ -265,6 +271,8 @@ struct arm64_jit_helper_profile_snapshot {
     uint64_t compile_insns;
     uint64_t compile_code_bytes;
     uint64_t compile_code_map_bytes;
+    uint64_t compile_code_slab_bytes;
+    uint64_t compile_code_slabs;
     uint64_t compile_ns;
     uint64_t c_helper_total;
     uint64_t c_dp_imm;
@@ -353,6 +361,13 @@ struct arm64_jit_state *arm64_jit_state_for_mmu(struct mmu *mmu);
 void arm64_jit_invalidate_page(struct mmu *mmu, page_t page);
 void arm64_jit_destroy_mmu(struct mmu *mmu);
 int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb);
+bool arm64_jit_alloc_code(struct arm64_jit_state *state, struct arm64_jit_block *block,
+        size_t size, uint8_t **rw_out);
+bool arm64_jit_protect_code(struct arm64_jit_block *block);
+void arm64_jit_free_code(struct arm64_jit_block *block);
+void arm64_jit_begin_code_batch(struct arm64_jit_state *state, size_t reserve_size);
+bool arm64_jit_finish_code_batch(struct arm64_jit_state *state);
+void arm64_jit_abort_code_batch(struct arm64_jit_state *state);
 
 int arm64_jit_trace_mode(void);
 int arm64_jit_verify_mode(void);
@@ -520,6 +535,8 @@ enum arm64_jit_emit_result arm64_jit_emit_system(struct arm64_jit_emitter *e, ui
 enum arm64_jit_emit_result arm64_jit_emit_ld_st(struct arm64_jit_emitter *e, uint32_t insn, addr_t guest_pc);
 enum arm64_jit_emit_result arm64_jit_emit_simd_fp(struct arm64_jit_emitter *e, uint32_t insn, addr_t guest_pc);
 void arm64_jit_emit_block(struct arm64_jit_state *state, struct arm64_jit_block *block);
+size_t arm64_jit_estimate_block_code_size(struct arm64_jit_state *state,
+        struct arm64_jit_block *block);
 
 #endif
 

@@ -120,6 +120,8 @@ struct arm64_jit_helper_profile {
     _Atomic uint64_t compile_insns;
     _Atomic uint64_t compile_code_bytes;
     _Atomic uint64_t compile_code_map_bytes;
+    _Atomic uint64_t compile_code_slab_bytes;
+    _Atomic uint64_t compile_code_slabs;
     _Atomic uint64_t compile_ns;
     _Atomic uint64_t c_helper_total;
     _Atomic uint64_t c_dp_imm;
@@ -146,6 +148,195 @@ struct arm64_jit_helper_profile {
 };
 
 static struct arm64_jit_helper_profile g_arm64_jit_helper_profile;
+
+#define ARM64_JIT_CODE_ALIGN 16u
+#define ARM64_JIT_BATCH_MAX_BLOCKS 128
+#define ARM64_JIT_BATCH_MAX_GUEST_BYTES (16u * 1024u)
+#define ARM64_JIT_BATCH_TARGET_FILL_NUM 4
+#define ARM64_JIT_BATCH_TARGET_FILL_DEN 5
+
+struct arm64_jit_compile_batch {
+    struct arm64_jit_block *blocks[ARM64_JIT_BATCH_MAX_BLOCKS];
+    size_t code_bytes;
+    uint32_t count;
+};
+
+struct arm64_jit_code_slab {
+    struct list chain;
+    uint8_t *rw;
+    size_t size;
+    size_t used;
+    uint32_t live_allocs;
+    bool executable;
+    bool sealed;
+};
+
+static size_t arm64_jit_round_up_size_runtime(size_t value, size_t align) {
+    if (align == 0)
+        return value;
+    size_t rem = value % align;
+    if (rem == 0)
+        return value;
+    return value + align - rem;
+}
+
+static struct arm64_jit_code_slab *arm64_jit_create_code_slab(size_t min_size) {
+    size_t page_size = (size_t) getpagesize();
+    size_t slab_size = arm64_jit_round_up_size_runtime(min_size, page_size);
+    if (slab_size == 0)
+        slab_size = page_size;
+    uint8_t *rw = mmap(NULL, slab_size, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (rw == MAP_FAILED) {
+        return NULL;
+    }
+    struct arm64_jit_code_slab *slab = calloc(1, sizeof(*slab));
+    if (slab == NULL) {
+        munmap(rw, slab_size);
+        return NULL;
+    }
+    list_init(&slab->chain);
+    slab->rw = rw;
+    slab->size = slab_size;
+    return slab;
+}
+
+static bool arm64_jit_seal_code_slab(struct arm64_jit_code_slab *slab) {
+    if (slab == NULL)
+        return true;
+    if (slab->executable)
+        return true;
+    size_t page_size = (size_t) getpagesize();
+    size_t protect_size = arm64_jit_round_up_size_runtime(slab->used, page_size);
+    if (protect_size == 0)
+        protect_size = page_size;
+    if (protect_size > slab->size)
+        return false;
+    if (mprotect(slab->rw, protect_size, PROT_READ | PROT_EXEC) != 0)
+        return false;
+    slab->executable = true;
+    slab->sealed = true;
+    return true;
+}
+
+bool arm64_jit_alloc_code(struct arm64_jit_state *state, struct arm64_jit_block *block,
+        size_t size, uint8_t **rw_out) {
+    if (state == NULL || block == NULL || rw_out == NULL || size == 0)
+        return false;
+    size_t alloc_size = arm64_jit_round_up_size_runtime(size, ARM64_JIT_CODE_ALIGN);
+    struct arm64_jit_code_slab *slab = state->active_code_slab;
+    if (slab == NULL || slab->sealed || slab->executable) {
+        if (!state->code_batch_active)
+            return false;
+        slab = arm64_jit_create_code_slab(alloc_size);
+        if (slab == NULL)
+            return false;
+        list_add_tail(&state->code_slabs, &slab->chain);
+        state->active_code_slab = slab;
+        atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.compile_code_slabs, 1,
+                memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.compile_code_slab_bytes,
+                slab->size, memory_order_relaxed);
+    }
+
+    size_t aligned_used = arm64_jit_round_up_size_runtime(slab->used, ARM64_JIT_CODE_ALIGN);
+    if (aligned_used > slab->size || alloc_size > slab->size - aligned_used) {
+        if (!state->code_batch_active)
+            return false;
+        slab = arm64_jit_create_code_slab(alloc_size);
+        if (slab == NULL)
+            return false;
+        list_add_tail(&state->code_slabs, &slab->chain);
+        state->active_code_slab = slab;
+        atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.compile_code_slabs, 1,
+                memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.compile_code_slab_bytes,
+                slab->size, memory_order_relaxed);
+        aligned_used = 0;
+    }
+    slab->used = aligned_used;
+    block->code_slab = slab;
+    block->code_slab_offset = (uint32_t) slab->used;
+    block->code_rw = slab->rw + slab->used;
+    block->code_rx = block->code_rw;
+    block->code_map_size = (uint32_t) alloc_size;
+    slab->used += alloc_size;
+    slab->live_allocs++;
+    *rw_out = block->code_rw;
+    return true;
+}
+
+bool arm64_jit_protect_code(struct arm64_jit_block *block) {
+    if (block == NULL || block->code_slab == NULL || block->code_rw == NULL ||
+            block->code_map_size == 0)
+        return false;
+    if (block->code_size == 0 || block->code_size > block->code_map_size)
+        return false;
+    __builtin___clear_cache((char *) block->code_rx,
+            (char *) block->code_rx + block->code_size);
+    return true;
+}
+
+void arm64_jit_begin_code_batch(struct arm64_jit_state *state, size_t reserve_size) {
+    if (state == NULL)
+        return;
+    state->code_batch_active = true;
+    state->active_code_slab = NULL;
+    if (reserve_size != 0) {
+        struct arm64_jit_code_slab *slab = arm64_jit_create_code_slab(reserve_size);
+        if (slab == NULL)
+            return;
+        list_add_tail(&state->code_slabs, &slab->chain);
+        state->active_code_slab = slab;
+        atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.compile_code_slabs, 1,
+                memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_arm64_jit_helper_profile.compile_code_slab_bytes,
+                slab->size, memory_order_relaxed);
+    }
+}
+
+bool arm64_jit_finish_code_batch(struct arm64_jit_state *state) {
+    if (state == NULL)
+        return false;
+    state->code_batch_active = false;
+    state->active_code_slab = NULL;
+    struct arm64_jit_code_slab *slab;
+    list_for_each_entry(&state->code_slabs, slab, chain) {
+        if (!arm64_jit_seal_code_slab(slab))
+            return false;
+    }
+    return true;
+}
+
+void arm64_jit_abort_code_batch(struct arm64_jit_state *state) {
+    if (state == NULL)
+        return;
+    struct arm64_jit_code_slab *slab = state->active_code_slab;
+    state->code_batch_active = false;
+    state->active_code_slab = NULL;
+    if (slab == NULL || slab->live_allocs != 0)
+        return;
+    list_remove_safe(&slab->chain);
+    munmap(slab->rw, slab->size);
+    free(slab);
+}
+
+void arm64_jit_free_code(struct arm64_jit_block *block) {
+    if (block == NULL || block->code_slab == NULL)
+        return;
+    struct arm64_jit_code_slab *slab = block->code_slab;
+    if (slab->live_allocs > 0)
+        slab->live_allocs--;
+    block->code_slab = NULL;
+    block->code_rw = NULL;
+    block->code_rx = NULL;
+    block->code_map_size = 0;
+    if (slab->live_allocs != 0)
+        return;
+    list_remove_safe(&slab->chain);
+    munmap(slab->rw, slab->size);
+    free(slab);
+}
 
 static uint64_t arm64_jit_monotonic_time_ns(void) {
     struct timespec ts;
@@ -535,6 +726,7 @@ static struct arm64_jit_state *arm64_jit_state_new(struct mmu *mmu) {
         return NULL;
     }
     list_init(&state->jetsam);
+    list_init(&state->code_slabs);
     lock_init(&state->lock);
     wrlock_init(&state->jetsam_lock);
     static bool tlb_profile_atexit_installed;
@@ -627,6 +819,15 @@ void arm64_jit_destroy_mmu(struct mmu *mmu) {
                 continue;
             arm64_jit_free_code_page_fragments(map->fragments);
             free(map);
+        }
+    }
+    if (!list_empty(&state->code_slabs)) {
+        struct arm64_jit_code_slab *slab, *tmp;
+        list_for_each_entry_safe(&state->code_slabs, slab, tmp, chain) {
+            list_remove_safe(&slab->chain);
+            if (slab->rw != NULL)
+                munmap(slab->rw, slab->size);
+            free(slab);
         }
     }
     unlock(&state->lock);
@@ -958,6 +1159,10 @@ void arm64_jit_get_helper_profile_snapshot(struct arm64_jit_helper_profile_snaps
             &g_arm64_jit_helper_profile.compile_code_bytes, memory_order_relaxed);
     out->compile_code_map_bytes = atomic_load_explicit(
             &g_arm64_jit_helper_profile.compile_code_map_bytes, memory_order_relaxed);
+    out->compile_code_slab_bytes = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.compile_code_slab_bytes, memory_order_relaxed);
+    out->compile_code_slabs = atomic_load_explicit(
+            &g_arm64_jit_helper_profile.compile_code_slabs, memory_order_relaxed);
     out->compile_ns = atomic_load_explicit(
             &g_arm64_jit_helper_profile.compile_ns, memory_order_relaxed);
     out->c_helper_total = atomic_load_explicit(
@@ -1060,7 +1265,8 @@ static void arm64_jit_dump_helper_profile(void) {
                     &g_arm64_jit_helper_profile.control_tbz_tbnz, memory_order_relaxed));
     fprintf(stderr,
             "[arm64-jit-helper-profile] compile blocks=%llu insns=%llu "
-            "code_bytes=%llu code_map_bytes=%llu compile_ns=%llu\n",
+            "code_bytes=%llu code_map_bytes=%llu code_slab_bytes=%llu code_slabs=%llu "
+            "compile_ns=%llu\n",
             (unsigned long long) atomic_load_explicit(
                     &g_arm64_jit_helper_profile.compile_blocks, memory_order_relaxed),
             (unsigned long long) atomic_load_explicit(
@@ -1069,6 +1275,10 @@ static void arm64_jit_dump_helper_profile(void) {
                     &g_arm64_jit_helper_profile.compile_code_bytes, memory_order_relaxed),
             (unsigned long long) atomic_load_explicit(
                     &g_arm64_jit_helper_profile.compile_code_map_bytes, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.compile_code_slab_bytes, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.compile_code_slabs, memory_order_relaxed),
             (unsigned long long) atomic_load_explicit(
                     &g_arm64_jit_helper_profile.compile_ns, memory_order_relaxed));
     fprintf(stderr,
@@ -5159,8 +5369,7 @@ static void arm64_jit_discard_block(struct arm64_jit_block *block) {
     if (block == NULL)
         return;
     arm64_jit_remove_entrypoints(block);
-    if (block->code_rw != NULL && block->code_map_size != 0)
-        munmap(block->code_rw, block->code_map_size);
+    arm64_jit_free_code(block);
     free(block->insn_pcs);
     free(block->insns);
     free(block->infos);
@@ -5573,6 +5782,13 @@ finalize_block:
         return block;
     }
 
+    return block;
+}
+
+static void arm64_jit_emit_profile_block(struct arm64_jit_state *state,
+        struct arm64_jit_block *block) {
+    if (state == NULL || block == NULL || block->insn_count == 0)
+        return;
     uint64_t compile_start_ns = arm64_jit_monotonic_time_ns();
     arm64_jit_build_fragment_gpr_map(block);
     arm64_jit_emit_block(state, block);
@@ -5611,7 +5827,123 @@ finalize_block:
                     block->infos[i].type);
         }
     }
-    return block;
+}
+
+static void arm64_jit_free_compile_batch(struct arm64_jit_compile_batch *batch) {
+    if (batch == NULL)
+        return;
+    for (uint32_t i = 0; i < batch->count; i++) {
+        if (batch->blocks[i] != NULL)
+            arm64_jit_discard_block(batch->blocks[i]);
+        batch->blocks[i] = NULL;
+    }
+    batch->count = 0;
+    batch->code_bytes = 0;
+}
+
+static bool arm64_jit_batch_fill_satisfied(size_t bytes) {
+    if (bytes == 0)
+        return false;
+    size_t page_size = (size_t) getpagesize();
+    size_t rounded = arm64_jit_round_up_size_runtime(bytes, page_size);
+    if (rounded == 0)
+        return false;
+    return bytes * ARM64_JIT_BATCH_TARGET_FILL_DEN >=
+            rounded * ARM64_JIT_BATCH_TARGET_FILL_NUM;
+}
+
+static bool arm64_jit_batch_contains_pc(const struct arm64_jit_compile_batch *batch,
+        addr_t pc) {
+    if (batch == NULL)
+        return false;
+    for (uint32_t i = 0; i < batch->count; i++) {
+        const struct arm64_jit_block *block = batch->blocks[i];
+        if (block != NULL && pc >= block->start_pc && pc < block->end_pc)
+            return true;
+    }
+    return false;
+}
+
+static bool arm64_jit_compile_batch_from(struct arm64_jit_state *state,
+        addr_t start_pc, struct tlb *tlb, struct arm64_jit_compile_batch *batch) {
+    if (state == NULL || batch == NULL)
+        return false;
+    memset(batch, 0, sizeof(*batch));
+    addr_t pc = start_pc;
+    while (batch->count < ARM64_JIT_BATCH_MAX_BLOCKS) {
+        if (batch->count != 0) {
+            if (arm64_jit_guest_has_likely_function_prologue(pc, tlb))
+                break;
+            int covering_index = -1;
+            if (arm64_jit_lookup_covering_block(state, pc, &covering_index) != NULL ||
+                    arm64_jit_lookup(state, pc) != NULL)
+                break;
+        }
+        struct arm64_jit_block *block = arm64_jit_compile_block(pc, tlb, state);
+        if (block == NULL)
+            break;
+        if (batch->count != 0 && arm64_jit_batch_contains_pc(batch, block->start_pc)) {
+            arm64_jit_discard_block(block);
+            break;
+        }
+        bool overlaps_batch = false;
+        for (uint32_t i = 0; i < batch->count; i++) {
+            struct arm64_jit_block *prev = batch->blocks[i];
+            if (prev == NULL)
+                continue;
+            if (block->start_pc < prev->end_pc && block->end_pc > prev->start_pc) {
+                overlaps_batch = true;
+                break;
+            }
+        }
+        if (overlaps_batch) {
+            arm64_jit_discard_block(block);
+            break;
+        }
+        if (block->insn_count == 0) {
+            batch->blocks[batch->count++] = block;
+            break;
+        }
+        arm64_jit_build_fragment_gpr_map(block);
+        size_t estimate = arm64_jit_estimate_block_code_size(state, block);
+        if (estimate == 0) {
+            arm64_jit_discard_block(block);
+            break;
+        }
+        batch->blocks[batch->count++] = block;
+        batch->code_bytes += estimate;
+        if (arm64_jit_batch_fill_satisfied(batch->code_bytes))
+            break;
+        if (block->end_pc <= pc)
+            break;
+        if (block->end_pc - start_pc >= ARM64_JIT_BATCH_MAX_GUEST_BYTES)
+            break;
+        pc = block->end_pc;
+    }
+    return batch->count != 0;
+}
+
+static bool arm64_jit_emit_compile_batch(struct arm64_jit_state *state,
+        struct arm64_jit_compile_batch *batch) {
+    if (state == NULL || batch == NULL || batch->count == 0)
+        return false;
+    arm64_jit_begin_code_batch(state, batch->code_bytes);
+    bool ok = true;
+    for (uint32_t i = 0; i < batch->count; i++) {
+        struct arm64_jit_block *block = batch->blocks[i];
+        if (block == NULL || block->insn_count == 0)
+            continue;
+        arm64_jit_emit_profile_block(state, block);
+        if (block->code_rx == NULL) {
+            ok = false;
+            break;
+        }
+    }
+    if (ok)
+        ok = arm64_jit_finish_code_batch(state);
+    else
+        arm64_jit_abort_code_batch(state);
+    return ok;
 }
 
 static int arm64_jit_should_exit_timer(struct cpu_state *cpu, struct tlb *tlb) {
@@ -6460,29 +6792,34 @@ int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb) {
             }
         }
         if (block == NULL) {
-            block = arm64_jit_compile_block(cpu->pc, tlb, state);
-            if (block != NULL) {
-                int covering_index = -1;
-                struct arm64_jit_block *covering = arm64_jit_lookup_covering_block(state, cpu->pc, &covering_index);
-                if (covering != NULL) {
-                    if (arm64_jit_trace_mode()) {
-                        fprintf(stderr,
-                                "[arm64-jit] discard-new pc=0x%llx new=0x%llx..0x%llx reuse=0x%llx idx=%d\n",
-                                (unsigned long long) cpu->pc,
-                                (unsigned long long) block->start_pc,
-                                (unsigned long long) block->end_pc,
-                                (unsigned long long) covering->start_pc,
-                                covering_index);
+            struct arm64_jit_compile_batch batch;
+            if (arm64_jit_compile_batch_from(state, cpu->pc, tlb, &batch) &&
+                    arm64_jit_emit_compile_batch(state, &batch)) {
+                for (uint32_t i = 0; i < batch.count; i++) {
+                    struct arm64_jit_block *candidate = batch.blocks[i];
+                    if (candidate == NULL)
+                        continue;
+                    int covering_index = -1;
+                    struct arm64_jit_block *covering =
+                            arm64_jit_lookup_covering_block(state, candidate->start_pc,
+                                    &covering_index);
+                    if (covering != NULL) {
+                        arm64_jit_discard_block(candidate);
+                        batch.blocks[i] = NULL;
+                        continue;
                     }
-                    arm64_jit_discard_block(block);
-                    block = covering;
-                    entry_index = covering_index;
-                } else {
-                    arm64_jit_insert(state, block);
-                    entry_index = arm64_jit_find_insn_index(block, cpu->pc);
-                    if (entry_index < 0)
-                        entry_index = 0;
+                    arm64_jit_insert(state, candidate);
+                    batch.blocks[i] = NULL;
                 }
+                block = arm64_jit_lookup_covering_block(state, cpu->pc, &entry_index);
+                if (block == NULL) {
+                    block = arm64_jit_lookup(state, cpu->pc);
+                    entry_index = 0;
+                }
+                arm64_jit_free_compile_batch(&batch);
+            } else {
+                arm64_jit_abort_code_batch(state);
+                arm64_jit_free_compile_batch(&batch);
             }
         }
         if (block != NULL) {
