@@ -9,16 +9,12 @@ when a task needs to be split.
   - Same-fragment `BR`/`RET` now jumps directly without spill.
   - Cross-fragment first probes the 256-entry exact-PC target cache, then the
     2-way fragment TLB, then the compact code-page fragment list.
-  - Current safe cross-fragment hit path still full-spills and returns to C
-    dispatch with `INT_NONE`. A direct target-entry attempt immediately hit host
-    `SIGILL` because the fast helper clobbered caller-saved cached registers
-    before invoking the source light-spill snippet. Reintroduce true
-    JIT-to-JIT entry only after the helper preserves or avoids every register
-    that may be live in the source fragment's cached-GPR map.
+  - Cross-fragment fast hits light-spill the source cached GPR/SP/NZCV state,
+    update runtime target metadata, and enter the target fragment's JIT-to-JIT
+    light entry. Misses full-spill before C helper fallback.
   - Fragment entry resolution assumes contiguous 4-byte guest instruction ranges
     and uses O(1) `(target_pc - start_pc) >> 2` indexing into a host `b`
     dispatch-table prelude.
-  - Misses now full-spill before C helper fallback.
   - Re-test `/sbin/apk update` after broader instruction coverage changes.
 - Keep same-fragment branch-reg target lookup O(1).
   - Current helper assumes contiguous fragment layout and targets
@@ -60,13 +56,34 @@ when a task needs to be split.
   - Current memory fast paths cover the hot scalar regoff forms, SIMD imm9
     signed-offset stores, single-register LD/ST-exclusive TLB hits, and scalar
     pair valid-form TLB misses via the shared page helper.
+  - Scalar pair stores no longer require both source registers to be cached;
+    uncached source operands are materialized from canonical CPU state, and
+    `Rt/Rt2 == 31` is materialized as zero.
   - Latest profiled C-helper counts for `/sbin/apk stats` after the
-    single-register `STXR`/`STLXR` fast path:
-    `imm9=612`, `regoff=21796`, `pair=17672`, `excl=476`.
+    scalar-pair uncached-source store change:
+    `ldr_uimm=1561`, `imm9=1095`, `regoff=21796`, `pair=17666`, `excl=476`,
+    `simd=1790`.
   - Remaining pair C-helper volume is mostly invalid/unmodeled forms such as
     vector pairs and base-overlap writeback pairs that still require full
     semantics. Non-overlap writeback stack pairs may use generic fallback, but
     that path must full-spill live cached GPRs before C/helper execution.
+- Investigate `/sbin/apk stats` broad-callgraph overhead next.
+  - Syscall-segment profiling currently shows about `738k` JIT blocks, `723k`
+    control transfers, `44k` C helpers, `8.1k` compiled blocks, about `55 MiB`
+    emitted code, and about `68 ms` compile time for one run.
+  - The largest observed segment regression (`index=7089`, syscall 215) had
+    only `20` C helpers but `499` block/control transfers, `252` compiled
+    blocks, and about `1.6 MiB` emitted code. This points at control/code-size
+    overhead, not memory C-helper volume.
+  - A generic "cut at candidate boundary after 128 instructions" experiment
+    reduced emitted code to about `51.5 MiB` but increased dispatches to about
+    `837k` and worsened total `apk stats` guest time by about `232 ms`.
+    Do not reintroduce that threshold blindly.
+  - Representative dumps show repeated inline TLB sequences for stack/global
+    accesses and branch-register miss epilogue islands after indirect stubs.
+    Next candidate work: shared slow-exit snippets or a slimmer terminal
+    branch-reg/control fallback shape that does not duplicate full restore
+    islands after every terminator.
 - Clean up helper ABI structure and naming.
   - Separate dedicated JITABI fast helpers, light transfer helpers, and slow
     fallback helpers more clearly in `helpers.S`.

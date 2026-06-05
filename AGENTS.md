@@ -267,6 +267,46 @@ Use syscall-segment profiling to compare guest execution time between syscall
 boundaries. This is useful when a complete workload is slower under JIT but the
 syscall count and stdout are correct.
 
+Use sampling when dispatch/c-helper counters are insufficient because a hot loop
+stays inside one fragment and does not cross JIT block boundaries often.
+Sampling is diagnostic-only and uses `ITIMER_PROF`, so do not use sampled runs as
+benchmark timings.
+
+### Guest-PC Sampling Profile
+
+The JIT sampler maps sampled host PCs in the current JIT fragment back to guest
+PCs using the fragment `pc_map`. It prints ranked
+`[arm64-jit-sample-profile]` lines when guest PID 1 exits, and also during
+final host shutdown before the runtime calls `_exit`.
+
+```bash
+timeout 30s env ISH_ARM64_BACKEND=arm64_jit \
+  ISH_ARM64_JIT_SAMPLE_PROFILE=1 \
+  ISH_ARM64_JIT_SAMPLE_INTERVAL_US=500 \
+  ISH_ARM64_JIT_SAMPLE_TOP=64 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs /sbin/apk stats \
+  > /private/tmp/apk_sample.stdout \
+  2> /private/tmp/apk_sample.stderr
+```
+
+For short workloads, repeat the target inside a bounded guest shell and require a
+visible success marker:
+
+```bash
+timeout 60s env ISH_ARM64_BACKEND=arm64_jit \
+  ISH_ARM64_JIT_SAMPLE_PROFILE=1 \
+  ISH_ARM64_JIT_SAMPLE_INTERVAL_US=500 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs \
+  /bin/sh -c 'i=0; while [ $i -lt 10 ]; do /sbin/apk stats >/dev/null || exit 1; i=$((i+1)); done; echo done' \
+  > /private/tmp/apk_sample_loop.stdout \
+  2> /private/tmp/apk_sample_loop.stderr
+```
+
+Success criterion for this loop smoke is that stdout contains exactly `done`.
+If the sampler reports many `outside` samples, time is being spent in C helpers,
+runtime, syscalls, or other non-current-fragment host code. If it reports many
+`jit_snippet` samples, inspect fragment entry/exit/reload/spill snippets.
+
 Hot-path hit/miss counters for JIT-to-JIT branch resolution are gated by the
 Meson option `arm64_jit_perf_counters`. Enable it explicitly before diagnosing
 fragment-cache hit rates:
@@ -510,6 +550,9 @@ Current indexed scalar-pair rule:
 
 - Offset, pre-index, and post-index scalar pair load/store may use the emitted
   TLB-hit fast path.
+- Scalar pair stores may use the emitted fast path even when `Rt`/`Rt2` are not
+  cached in host registers; the fast path materializes uncached source operands
+  from canonical CPU state and treats source register 31 as zero.
 - Base-overlap writeback forms stay on the existing C helper path until their
   constrained-unpredictable behavior is deliberately modeled.
 - If the emitted fast path falls back to the C helper for a writeback form, it
@@ -617,6 +660,25 @@ Important invariants for future JIT-to-JIT transfer work:
   been seen. A softer overflow policy that kept scanning until a later boundary
   caused bounded `/bin/echo hello` and `/sbin/apk stats` runs to time out in
   this workspace; do not reintroduce it without a verifier-frontier fix.
+- Do not add a simple "cut at candidate boundary after N instructions"
+  threshold without measuring full workload dispatch count. A 128-instruction
+  candidate-boundary experiment reduced `/sbin/apk stats` emitted code from
+  about 55 MiB to about 51.5 MiB, but increased block dispatches from about
+  738k to about 837k and worsened total guest time by about 232 ms.
+- The emitter uses a memory-efficient three-pass shape:
+  - scan/analyze and build the fragment GPR map
+  - dry-run the normal emitter path to estimate exact host code size
+  - mmap a host-page-rounded code buffer and emit the real executable bytes
+  `block->code_size` is the actual emitted byte range used for dumps and host
+  PC checks. `block->code_map_size` is the mmap length used for unmap and
+  footprint accounting. Helper-profile output reports both
+  `code_bytes` and `code_map_bytes`.
+- Guest `MEM_WRITE` invalidation should be targeted to pages with live JIT
+  blocks. `arm64_jit_invalidate_page()` scans the per-page block lists first and
+  only bumps `invalidate_gen`, clears code-page maps, and jetsams blocks when
+  the written page actually owns live compiled code. Do not reintroduce a global
+  generation bump for ordinary data writes; it poisons PC target/code-page-map
+  fast caches without indicating self-modifying code.
 - Already compiled block starts are also not absolute hard stops when the new
   fragment can safely merge and later supersede the contained block. A merge is
   safe when the combined contiguous range still fits `ARM64_JIT_MAX_INSNS`.

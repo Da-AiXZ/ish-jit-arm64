@@ -21,6 +21,9 @@ static void halt_system(void);
 // this no-op prevents an undefined symbol error.
 __attribute__((weak)) void restore_termios(void) {}
 
+// Optional JIT diagnostics: runtime.c provides this for ARM64 JIT builds.
+__attribute__((weak)) void arm64_jit_dump_sample_profile(void) {}
+
 static bool exit_tgroup(struct task *task) {
     struct tgroup *group = task->group;
     list_remove(&task->group_links);
@@ -57,6 +60,7 @@ noreturn void do_exit(int status) {
         extern void dump_pc_trace(void);
         dump_pc_hist();
         dump_pc_trace();
+        arm64_jit_dump_sample_profile();
     }
     // If this thread was already marked as leaked by the safety valve,
     // the group leader has finished exiting and the group struct may be
@@ -411,6 +415,7 @@ static void halt_system(void) {
     restore_termios();
     extern void dump_pc_hist(void);
     dump_pc_hist();
+    arm64_jit_dump_sample_profile();
 
     // Force exit the entire host process. Orphaned guest threads
     // (stuck in JIT loops after do_exit_group force cleanup) keep

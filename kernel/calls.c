@@ -210,6 +210,14 @@ void handle_interrupt(int interrupt) {
             arm64_jit_get_helper_profile_snapshot(&jit_profile);
             jit_delta.dispatch_blocks = jit_profile.dispatch_blocks -
                     syscall_segment_last_jit_profile.dispatch_blocks;
+            jit_delta.compile_blocks = jit_profile.compile_blocks -
+                    syscall_segment_last_jit_profile.compile_blocks;
+            jit_delta.compile_insns = jit_profile.compile_insns -
+                    syscall_segment_last_jit_profile.compile_insns;
+            jit_delta.compile_code_bytes = jit_profile.compile_code_bytes -
+                    syscall_segment_last_jit_profile.compile_code_bytes;
+            jit_delta.compile_ns = jit_profile.compile_ns -
+                    syscall_segment_last_jit_profile.compile_ns;
             jit_delta.c_helper_total = jit_profile.c_helper_total -
                     syscall_segment_last_jit_profile.c_helper_total;
             jit_delta.c_dp_imm = jit_profile.c_dp_imm - syscall_segment_last_jit_profile.c_dp_imm;
@@ -254,7 +262,9 @@ void handle_interrupt(int interrupt) {
             fprintf(stderr,
                     "[syscall-segment] index=%llu pid=%d comm=%s pc=0x%llx syscall=%u "
                     "guest_ns=%llu syscall_ns=%llu x0=0x%llx "
-                    "jit_blocks=%llu jit_c_helper=%llu jit_control=%llu "
+                    "jit_blocks=%llu jit_compile_blocks=%llu jit_compile_insns=%llu "
+                    "jit_compile_code_bytes=%llu jit_compile_ns=%llu "
+                    "jit_c_helper=%llu jit_control=%llu "
                     "jit_dispatch=%llu jit_branch_reg=%llu jit_b_cond=%llu "
                     "jit_cbz=%llu jit_tbz=%llu "
                     "jit_c_dp_imm=%llu jit_c_dp_reg=%llu jit_c_ldr_uimm=%llu "
@@ -270,6 +280,10 @@ void handle_interrupt(int interrupt) {
                     (unsigned long long) (syscall_exit_ns - syscall_enter_ns),
                     (unsigned long long) cpu->regs[0],
                     (unsigned long long) jit_delta.dispatch_blocks,
+                    (unsigned long long) jit_delta.compile_blocks,
+                    (unsigned long long) jit_delta.compile_insns,
+                    (unsigned long long) jit_delta.compile_code_bytes,
+                    (unsigned long long) jit_delta.compile_ns,
                     (unsigned long long) jit_delta.c_helper_total,
                     (unsigned long long) jit_delta.control_total,
                     (unsigned long long) jit_delta.control_dispatch,

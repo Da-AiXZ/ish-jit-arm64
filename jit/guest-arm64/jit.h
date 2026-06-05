@@ -130,6 +130,7 @@ struct arm64_jit_block {
     uint32_t spill_code_offset;
     uint32_t reload_code_offset;
     uint32_t entry_thunks_offset;
+    uint32_t code_map_size;
     uint32_t *insn_host_offsets;
     void **entry_code;
     void *c_entry_fn;
@@ -260,6 +261,11 @@ extern struct arm64_jit_tlb_profile g_arm64_jit_tlb_profile;
 
 struct arm64_jit_helper_profile_snapshot {
     uint64_t dispatch_blocks;
+    uint64_t compile_blocks;
+    uint64_t compile_insns;
+    uint64_t compile_code_bytes;
+    uint64_t compile_code_map_bytes;
+    uint64_t compile_ns;
     uint64_t c_helper_total;
     uint64_t c_dp_imm;
     uint64_t c_dp_reg;
@@ -321,6 +327,7 @@ struct arm64_jit_emitter {
     size_t cap;
     size_t size;
     bool overflowed;
+    bool dry_run;
 };
 
 enum arm64_jit_fixup_kind {
@@ -356,6 +363,7 @@ int arm64_jit_handle_verify_sigtrap(void *ctx);
 void arm64_jit_set_saved_pc(addr_t pc);
 void arm64_jit_record_fault_pc(void *host_pc);
 void arm64_jit_dump_tlb_profile(void);
+void arm64_jit_dump_sample_profile(void);
 
 int c_load64(struct tlb *tlb, addr_t addr, uint64_t *out);
 int c_load32(struct tlb *tlb, addr_t addr, uint32_t *out);
