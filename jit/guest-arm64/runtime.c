@@ -123,6 +123,11 @@ struct arm64_jit_helper_profile {
     _Atomic uint64_t compile_code_slab_bytes;
     _Atomic uint64_t compile_code_slabs;
     _Atomic uint64_t compile_ns;
+    _Atomic uint64_t invalidate_calls;
+    _Atomic uint64_t invalidate_hint_misses;
+    _Atomic uint64_t invalidate_noop_pages;
+    _Atomic uint64_t invalidate_pages;
+    _Atomic uint64_t invalidate_blocks;
     _Atomic uint64_t c_helper_total;
     _Atomic uint64_t c_dp_imm;
     _Atomic uint64_t c_dp_reg;
@@ -170,6 +175,33 @@ struct arm64_jit_code_slab {
     bool executable;
     bool sealed;
 };
+
+static size_t arm64_jit_exec_page_hint_bit(page_t page) {
+    uint64_t x = (uint64_t) page;
+    x ^= x >> 23;
+    x *= 0x2127599bf4325c37ull;
+    x ^= x >> 47;
+    return (size_t) x & (ARM64_JIT_EXEC_PAGE_HINT_BITS - 1);
+}
+
+static void arm64_jit_mark_exec_page_hint(struct arm64_jit_state *state, page_t page) {
+    if (state == NULL || state->exec_page_hint_words == NULL ||
+            state->exec_page_hint_word_count == 0)
+        return;
+    size_t bit = arm64_jit_exec_page_hint_bit(page);
+    atomic_fetch_or_explicit(&state->exec_page_hint_words[bit >> 6],
+            1ull << (bit & 63), memory_order_relaxed);
+}
+
+static bool arm64_jit_maybe_has_exec_page(struct arm64_jit_state *state, page_t page) {
+    if (state == NULL || state->exec_page_hint_words == NULL ||
+            state->exec_page_hint_word_count == 0)
+        return true;
+    size_t bit = arm64_jit_exec_page_hint_bit(page);
+    uint64_t word = atomic_load_explicit(&state->exec_page_hint_words[bit >> 6],
+            memory_order_relaxed);
+    return (word & (1ull << (bit & 63))) != 0;
+}
 
 static size_t arm64_jit_round_up_size_runtime(size_t value, size_t align) {
     if (align == 0)
@@ -710,12 +742,16 @@ static struct arm64_jit_state *arm64_jit_state_new(struct mmu *mmu) {
     state->code_page_maps = calloc(state->code_page_map_size, sizeof(*state->code_page_maps));
     state->pc_target_cache_size = ARM64_JIT_PC_TARGET_CACHE_SIZE;
     state->pc_target_cache = calloc(state->pc_target_cache_size, sizeof(*state->pc_target_cache));
+    state->exec_page_hint_word_count = ARM64_JIT_EXEC_PAGE_HINT_BITS / 64;
+    state->exec_page_hint_words = calloc(state->exec_page_hint_word_count,
+            sizeof(*state->exec_page_hint_words));
     state->page_hash = calloc(ARM64_JIT_PAGE_HASH_SIZE, sizeof(*state->page_hash));
     if (state->hash == NULL || state->entry_hash == NULL ||
             state->entry_cache == NULL || state->fragment_tlb == NULL ||
             state->code_page_maps == NULL || state->pc_target_cache == NULL ||
-            state->page_hash == NULL) {
+            state->exec_page_hint_words == NULL || state->page_hash == NULL) {
         free(state->page_hash);
+        free(state->exec_page_hint_words);
         free(state->pc_target_cache);
         free(state->code_page_maps);
         free(state->fragment_tlb);
@@ -834,6 +870,7 @@ void arm64_jit_destroy_mmu(struct mmu *mmu) {
 
     wrlock_destroy(&state->jetsam_lock);
     free(state->page_hash);
+    free(state->exec_page_hint_words);
     free(state->pc_target_cache);
     free(state->code_page_maps);
     free(state->fragment_tlb);
@@ -1281,6 +1318,18 @@ static void arm64_jit_dump_helper_profile(void) {
                     &g_arm64_jit_helper_profile.compile_code_slabs, memory_order_relaxed),
             (unsigned long long) atomic_load_explicit(
                     &g_arm64_jit_helper_profile.compile_ns, memory_order_relaxed));
+    fprintf(stderr,
+            "[arm64-jit-helper-profile] invalidation calls=%llu hint_misses=%llu noop_pages=%llu pages=%llu blocks=%llu\n",
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.invalidate_calls, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.invalidate_hint_misses, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.invalidate_noop_pages, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.invalidate_pages, memory_order_relaxed),
+            (unsigned long long) atomic_load_explicit(
+                    &g_arm64_jit_helper_profile.invalidate_blocks, memory_order_relaxed));
     fprintf(stderr,
             "[arm64-jit-helper-profile] c_helper dp_imm=%llu dp_reg=%llu "
             "ldr_uimm=%llu str_uimm=%llu simd_uimm=%llu simd_addr=%llu "
@@ -5522,9 +5571,12 @@ static void arm64_jit_insert(struct arm64_jit_state *state, struct arm64_jit_blo
     list_init(&block->entrypoints);
     list_init_add(&state->hash[block->start_pc % state->hash_size], &block->hash_chain);
     list_init_add(arm64_jit_blocks_list(state, PAGE(block->start_pc), 0), &block->page[0]);
+    arm64_jit_mark_exec_page_hint(state, PAGE(block->start_pc));
     if (block->end_pc != 0 &&
-            PAGE(block->start_pc) != PAGE(block->end_pc - 1))
+            PAGE(block->start_pc) != PAGE(block->end_pc - 1)) {
         list_init_add(arm64_jit_blocks_list(state, PAGE(block->end_pc - 1), 1), &block->page[1]);
+        arm64_jit_mark_exec_page_hint(state, PAGE(block->end_pc - 1));
+    }
     for (uint32_t i = 1; i < block->insn_count; i++) {
         if (block->entry_code[i] == NULL || block->insn_host_offsets[i] == UINT32_MAX)
             continue;
@@ -5565,6 +5617,11 @@ void arm64_jit_invalidate_page(struct mmu *mmu, page_t page) {
     struct arm64_jit_state *state = arm64_jit_state_for_mmu(mmu);
     if (state == NULL)
         return;
+    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.invalidate_calls);
+    if (!arm64_jit_maybe_has_exec_page(state, page)) {
+        arm64_jit_profile_inc(&g_arm64_jit_helper_profile.invalidate_hint_misses);
+        return;
+    }
     lock(&state->lock);
     bool has_live_block = false;
     for (int i = 0; i <= 1 && !has_live_block; i++) {
@@ -5580,9 +5637,11 @@ void arm64_jit_invalidate_page(struct mmu *mmu, page_t page) {
         }
     }
     if (!has_live_block) {
+        arm64_jit_profile_inc(&g_arm64_jit_helper_profile.invalidate_noop_pages);
         unlock(&state->lock);
         return;
     }
+    arm64_jit_profile_inc(&g_arm64_jit_helper_profile.invalidate_pages);
     state->invalidate_gen++;
     arm64_jit_clear_code_page_map(state, page);
     for (int i = 0; i <= 1; i++) {
@@ -5593,6 +5652,7 @@ void arm64_jit_invalidate_page(struct mmu *mmu, page_t page) {
         list_for_each_entry_safe(blocks, block, tmp, page[i]) {
             if (block->is_jetsam)
                 continue;
+            arm64_jit_profile_inc(&g_arm64_jit_helper_profile.invalidate_blocks);
             arm64_jit_disconnect(state, block);
             block->is_jetsam = true;
             list_add(&state->jetsam, &block->jetsam);

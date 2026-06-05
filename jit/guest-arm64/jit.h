@@ -24,6 +24,7 @@
 #define ARM64_JIT_FRAGMENT_TLB_WAYS 2
 #define ARM64_JIT_CODE_PAGE_MAP_SIZE (1 << 12)
 #define ARM64_JIT_PC_TARGET_CACHE_SIZE 256
+#define ARM64_JIT_EXEC_PAGE_HINT_BITS (1 << 16)
 #define ARM64_JIT_CODE_PAGE_FAST_SCAN_LIMIT 32
 #define ARM64_JIT_MAX_INSNS 1024
 #define ARM64_JIT_INITIAL_INSN_CAP ARM64_JIT_MAX_INSNS
@@ -222,6 +223,8 @@ struct arm64_jit_state {
     size_t code_page_map_size;
     struct arm64_jit_pc_target_cache_entry *pc_target_cache;
     size_t pc_target_cache_size;
+    _Atomic uint64_t *exec_page_hint_words;
+    size_t exec_page_hint_word_count;
     struct arm64_jit_page_bucket *page_hash;
     struct list jetsam;
     struct list code_slabs;

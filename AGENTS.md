@@ -679,6 +679,14 @@ Important invariants for future JIT-to-JIT transfer work:
   the written page actually owns live compiled code. Do not reintroduce a global
   generation bump for ordinary data writes; it poisons PC target/code-page-map
   fast caches without indicating self-modifying code.
+- Before taking the JIT state lock for a guest write invalidation,
+  `arm64_jit_invalidate_page()` probes a conservative sticky executable-page
+  hint bitset. A clear bit means no compiled block has ever marked that hash
+  bit, so the invalidation can return without locking. A set bit is only a
+  maybe-hit and must still use the authoritative per-page block-list scan. Never
+  make this hint an exact direct-mapped page tag unless collisions are handled
+  without false negatives; missing a real code-page write would leave stale JIT
+  code executable.
 - JIT code memory is allocated through compile-only slabs. A slab is writable
   only while the current compile batch is emitting, then `mprotect`ed RX once
   and sealed; sealed slabs must never be made writable again. Each block still
