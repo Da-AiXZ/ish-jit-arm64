@@ -42,11 +42,68 @@ static void crash_handler(int sig, siginfo_t *info, void *ctx) {
 #if defined(__aarch64__) && defined(GUEST_ARM64)
     if (sig == SIGTRAP && in_jit && arm64_jit_handle_verify_sigtrap(ctx))
         return;
+    if (sig == SIGILL && in_jit && getenv("ISH_ARM64_JIT_HOST_SIGILL_TRACE")) {
+        ucontext_t *uc = (ucontext_t *)ctx;
+        char buf[512];
+        int len = snprintf(buf, sizeof(buf),
+                "[arm64-jit-host-sigill] saved_pc=0x%llx host_pc=0x%llx "
+                "x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx "
+                "x16=0x%llx x17=0x%llx x21=0x%llx lr=0x%llx sp=0x%llx\n",
+                (unsigned long long) jit_saved_pc,
+                (unsigned long long) uc->uc_mcontext->__ss.__pc,
+                (unsigned long long) uc->uc_mcontext->__ss.__x[0],
+                (unsigned long long) uc->uc_mcontext->__ss.__x[1],
+                (unsigned long long) uc->uc_mcontext->__ss.__x[2],
+                (unsigned long long) uc->uc_mcontext->__ss.__x[3],
+                (unsigned long long) uc->uc_mcontext->__ss.__x[4],
+                (unsigned long long) uc->uc_mcontext->__ss.__x[16],
+                (unsigned long long) uc->uc_mcontext->__ss.__x[17],
+                (unsigned long long) uc->uc_mcontext->__ss.__x[21],
+                (unsigned long long) uc->uc_mcontext->__ss.__lr,
+                (unsigned long long) uc->uc_mcontext->__ss.__sp);
+        write(STDERR_FILENO, buf, len);
+    }
     // If we're inside JIT code and got SIGSEGV/SIGBUS, recover by redirecting
     // execution to jit_crash_trampoline via ucontext PC manipulation.
     // This avoids the overhead of _setjmp on every block entry.
     if ((sig == SIGSEGV || sig == SIGBUS) && in_jit) {
         ucontext_t *uc = (ucontext_t *)ctx;
+#if defined(GUEST_ARM64)
+        if (g_arm64_jit_runtime != NULL) {
+            char jitbuf[1024];
+            int jitlen = snprintf(jitbuf, sizeof(jitbuf),
+                    "\n[arm64-jit-host-fault] sig=%d saved_pc=0x%llx host_pc=0x%llx "
+                    "addr=%p x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx "
+                    "x16=0x%llx x17=0x%llx x19=0x%llx x20=0x%llx "
+                    "x21=0x%llx lr=0x%llx sp=0x%llx rt=%p "
+                    "resume_pc=0x%llx fault_pc=0x%llx dbg0=0x%llx dbg1=0x%llx "
+                    "dbg2=0x%llx dbg3=0x%llx\n",
+                    sig,
+                    (unsigned long long) jit_saved_pc,
+                    (unsigned long long) uc->uc_mcontext->__ss.__pc,
+                    info->si_addr,
+                    (unsigned long long) uc->uc_mcontext->__ss.__x[0],
+                    (unsigned long long) uc->uc_mcontext->__ss.__x[1],
+                    (unsigned long long) uc->uc_mcontext->__ss.__x[2],
+                    (unsigned long long) uc->uc_mcontext->__ss.__x[3],
+                    (unsigned long long) uc->uc_mcontext->__ss.__x[16],
+                    (unsigned long long) uc->uc_mcontext->__ss.__x[17],
+                    (unsigned long long) uc->uc_mcontext->__ss.__x[19],
+                    (unsigned long long) uc->uc_mcontext->__ss.__x[20],
+                    (unsigned long long) uc->uc_mcontext->__ss.__x[21],
+                    (unsigned long long) uc->uc_mcontext->__ss.__lr,
+                    (unsigned long long) uc->uc_mcontext->__ss.__sp,
+                    (void *) g_arm64_jit_runtime,
+                    (unsigned long long) g_arm64_jit_runtime->resume_pc,
+                    (unsigned long long) g_arm64_jit_runtime->fault_pc,
+                    (unsigned long long) g_arm64_jit_runtime->debug0,
+                    (unsigned long long) g_arm64_jit_runtime->debug1,
+                    (unsigned long long) g_arm64_jit_runtime->debug2,
+                    (unsigned long long) g_arm64_jit_runtime->debug3);
+            write(STDERR_FILENO, jitbuf, jitlen);
+            _exit(132);
+        }
+#endif
         if (jit_saved_pc == 0xefeb64a4 || jit_saved_pc == 0xefeb6494) {
             uint64_t rt_ptr = uc->uc_mcontext->__ss.__x[21];
             fprintf(stderr,

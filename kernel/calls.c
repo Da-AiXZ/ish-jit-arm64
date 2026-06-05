@@ -1040,6 +1040,20 @@ void handle_interrupt(int interrupt) {
             }
             uint16_t brk_imm = (brk_insn >> 5) & 0xFFFF;
             (void)brk_imm;
+            if (getenv("ISH_ARM64_JIT_BRK_TRACE")) {
+                fprintf(stderr,
+                        "[arm64-jit-brk] pc=0x%llx insn=0x%08x imm=0x%x "
+                        "lr=0x%llx sp=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx\n",
+                        (unsigned long long) cpu->pc,
+                        brk_insn,
+                        brk_imm,
+                        (unsigned long long) cpu->regs[30],
+                        (unsigned long long) cpu->sp,
+                        (unsigned long long) cpu->regs[0],
+                        (unsigned long long) cpu->regs[1],
+                        (unsigned long long) cpu->regs[2],
+                        (unsigned long long) cpu->regs[3]);
+            }
 
             // musl malloc corruption BRK #0x3e8 inside
             // malloc_usable_size / free / realloc family. Occurs when an

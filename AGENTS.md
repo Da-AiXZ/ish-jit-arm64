@@ -243,6 +243,23 @@ timeout 20s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_HANDOFF_AFTER_BLOCKS=2
 
 `ISH_ARM64_JIT_UNTIL_PC=0x...` hands off when dispatch reaches a specific guest
 PC. `ISH_ARM64_JIT_PROGRESS_INTERVAL=N` logs every `N` dispatched JIT blocks.
+`ISH_ARM64_JIT_PROGRESS_START_BLOCKS=N` suppresses progress logs until the
+dispatch counter reaches `N`; combine it with a small interval when narrowing a
+late hot/stuck region without producing huge logs.
+
+Verifier narrowing knobs:
+
+- `ISH_ARM64_JIT_VERIFY_FILTER=0xPC` emits verifier `brk` sites only for blocks
+  covering that PC and skips cross-block branch observations inside the filter.
+- `ISH_ARM64_JIT_VERIFY_START_BLOCK=N` ignores verifier traps before the `N`th
+  dispatched JIT block. Use it only with a bounded command.
+
+Very narrow trace knobs:
+
+- `ISH_ARM64_JIT_IMM9_TRACE=1` prints up to 512 scalar imm9 C-helper entries,
+  including decoded mode/base/address/writeback context.
+- `ISH_ARM64_JIT_BRK_TRACE=1` traces host-side JIT verifier `brk` handling.
+- `ISH_ARM64_SIGNAL_TRACE=1` traces guest signal delivery/recovery context.
 
 ## Runtime Bottleneck Profiling
 
@@ -474,9 +491,12 @@ The intended memory-helper architecture is:
   - spill/reload around miss
   - permission failure / page fault publication
   - fragment exit on fault
-- shared page helper ABI uses `x4` for `access_kind` (`0=read`, `1=write`);
-  `x3` remains family-specific, such as a scalar store value or load return
-  selector.
+- shared page helper ABI uses `x16` for `access_kind` (`0=read`, `1=write`);
+  `x3` is the caller helper-frame unwind byte count used when the shared helper
+  exits the fragment directly on fault.
+- Do not pass shared-helper metadata through `x4-x15`. Those registers may hold
+  cached guest GPRs at the fault-spill frontier. Clobbering them before the
+  shared helper can publish stale or wrong guest state.
 
 The ABI is documented in:
 
@@ -494,6 +514,10 @@ Current indexed scalar-pair rule:
   must reload the cached base/SP register from `cpu` after helper success.
   Otherwise the helper updates canonical CPU state but the fragment continues
   with a stale cached base register.
+- Generic pair fallback helpers that read operands from canonical `cpu->regs`
+  must be entered through a full-spill/continue wrapper. Do not use a
+  success-only C helper wrapper for fallback pair forms when source operands may
+  be live only in cached host registers.
 - Scalar unscaled `imm9` loads/stores and scalar register-offset loads/stores
   should use emitted TLB-hit fast paths when base/offset/value registers are
   cached or can be materialized from canonical CPU state. Register-offset
@@ -571,17 +595,35 @@ Important invariants for future JIT-to-JIT transfer work:
   Exact self-branches route through the helper path. If the local-fixup table is
   full, the emitter must fall back to the helper path instead of emitting an
   unpatched placeholder branch; an unpatched `b #0` is a host self-loop bug.
+- Do not emit timer/verifier safepoints on local backedges in plain JIT. Verifier
+  mode already inserts `brk` sites for instruction-by-instruction observation,
+  and plain JIT uses the outer block-entry timer check when entering fragments.
+  Per-backedge inline checks were measurable in libc string loops.
+- Large soft-pressure fragments can make host branch distances much larger
+  than guest branch distances. Local fixup patching must range-check the host
+  immediate width for each branch class (`B`, `B.cond`, `CBZ/CBNZ`,
+  `TBZ/TBNZ`) and disable/retry that individual local fixup on overflow. Do
+  not silently truncate host immediates; a truncated `TBNZ` was observed to
+  branch into a restore/epilogue island.
 - Fragment splitting should treat indirect branches, returns, exceptions, and
   unsupported instructions as boundary candidates, not hard boundaries. The
   scanner keeps moving until it hits code/address-space boundary, max
-  instruction count, or register-cache overflow. On overflow or max scan, cut
-  at the latest candidate boundary if it is in the recent half of the scan;
-  otherwise materialize the whole scanned range.
+  instruction count, or register-cache overflow. Overflow currently cuts at the
+  latest candidate boundary, or at the current instruction if no boundary has
+  been seen. A softer overflow policy that kept scanning until a later boundary
+  caused bounded `/bin/echo hello` and `/sbin/apk stats` runs to time out in
+  this workspace; do not reintroduce it without a verifier-frontier fix.
 - Already compiled block starts are also not absolute hard stops when the new
   fragment can safely merge and later supersede the contained block. A merge is
-  safe only when the combined contiguous range still fits
-  `ARM64_JIT_MAX_INSNS` and the combined analyzed GPR-use mask does not exceed
-  `ARM64_JIT_MAX_ALLOCATABLE_GPRS`.
+  safe when the combined contiguous range still fits `ARM64_JIT_MAX_INSNS`.
+  Combined GPR use may exceed `ARM64_JIT_MAX_ALLOCATABLE_GPRS`; the emitter
+  caches the most useful registers and leaves the rest uncached.
+- Do not broadly lower uncached DP register/immediate operations by simply
+  loading CPU slots into scratch registers and storing back. A first attempt at
+  this exposed SP/ZR semantic traps in logical and add/sub forms and broke
+  loader relocation/RELRO before `/bin/echo hello` printed. Reintroduce such
+  lowering one family at a time under verifier, with explicit SP-vs-ZR rules
+  and exact stdout checks.
 
 ### Code-Page Map Probe State
 

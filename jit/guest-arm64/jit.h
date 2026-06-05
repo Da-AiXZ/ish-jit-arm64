@@ -26,11 +26,14 @@
 #define ARM64_JIT_PC_TARGET_CACHE_SIZE 256
 #define ARM64_JIT_CODE_PAGE_FAST_SCAN_LIMIT 32
 #define ARM64_JIT_MAX_INSNS 1024
+#define ARM64_JIT_INITIAL_INSN_CAP ARM64_JIT_MAX_INSNS
+#define ARM64_JIT_SCAN_HARD_LIMIT ARM64_JIT_MAX_INSNS
 #define ARM64_JIT_MAX_PC_MAP 2048
 #define ARM64_JIT_MAX_FIXUPS 2048
 #define ARM64_JIT_MAX_GPR_USES 6
 #define ARM64_JIT_MAX_ALLOCATABLE_GPRS 18
-#define ARM64_JIT_MAX_VERIFY_SITES ARM64_JIT_MAX_INSNS
+#define ARM64_JIT_TARGET_NATURAL_BOUNDARY_INSNS 128
+#define ARM64_JIT_MAX_VERIFY_SITES ARM64_JIT_SCAN_HARD_LIMIT
 
 enum arm64_jit_host_role_reg {
     ARM64_JIT_HOST_CPU = 19,
@@ -88,10 +91,6 @@ struct arm64_jit_local_fixup {
     uint32_t kind;
 };
 
-struct arm64_jit_backedge_safepoint {
-    addr_t target_pc;
-};
-
 struct arm64_jit_verify_site {
     uint32_t host_offset;
     addr_t guest_pc;
@@ -112,9 +111,10 @@ struct arm64_jit_block {
     bool disable_local_fixups;
     int terminal_interrupt;
     uint32_t insn_count;
-    addr_t insn_pcs[ARM64_JIT_MAX_INSNS];
-    uint32_t insns[ARM64_JIT_MAX_INSNS];
-    struct arm64_jit_insn_info infos[ARM64_JIT_MAX_INSNS];
+    uint32_t insn_cap;
+    addr_t *insn_pcs;
+    uint32_t *insns;
+    struct arm64_jit_insn_info *infos;
     struct arm64_jit_guest_reg_map gpr_map;
     struct list hash_chain;
     struct list page[2];
@@ -130,8 +130,8 @@ struct arm64_jit_block {
     uint32_t spill_code_offset;
     uint32_t reload_code_offset;
     uint32_t entry_thunks_offset;
-    uint32_t insn_host_offsets[ARM64_JIT_MAX_INSNS];
-    void *entry_code[ARM64_JIT_MAX_INSNS];
+    uint32_t *insn_host_offsets;
+    void **entry_code;
     void *c_entry_fn;
     void *jit_entry_fn;
     uint32_t pc_map_count;
@@ -142,8 +142,6 @@ struct arm64_jit_block {
     struct arm64_jit_local_fixup fixups[ARM64_JIT_MAX_FIXUPS];
     uint32_t disabled_local_fixup_count;
     addr_t disabled_local_fixup_pcs[ARM64_JIT_MAX_FIXUPS];
-    uint32_t backedge_safepoint_count;
-    struct arm64_jit_backedge_safepoint backedge_safepoints[ARM64_JIT_MAX_FIXUPS];
     void *light_spill_state_fn;
     uint32_t light_spill_code_offset;
 };
@@ -351,6 +349,8 @@ int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb);
 
 int arm64_jit_trace_mode(void);
 int arm64_jit_verify_mode(void);
+addr_t arm64_jit_verify_filter_pc(void);
+uint64_t arm64_jit_verify_start_block(void);
 int arm64_jit_branch_reg_fast_mode(void);
 int arm64_jit_handle_verify_sigtrap(void *ctx);
 void arm64_jit_set_saved_pc(addr_t pc);
@@ -369,7 +369,6 @@ int c_store8(struct tlb *tlb, addr_t addr, uint8_t value);
 
 int arm64_jit_helper_unsupported(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_syscall(struct arm64_jit_runtime *rt, addr_t guest_pc);
-int arm64_jit_helper_timer(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_verify_trap(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_dispatch(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_branch_reg(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
@@ -421,7 +420,6 @@ int arm64_jit_helper_ldst_pair_vec_live(struct arm64_jit_runtime *rt, uint64_t p
 
 int arm64_jit_helper_unsupported_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_syscall_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
-int arm64_jit_helper_timer_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_verify_trap_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_dispatch_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_control_transfer_fast_jitabi(struct arm64_jit_runtime *rt,

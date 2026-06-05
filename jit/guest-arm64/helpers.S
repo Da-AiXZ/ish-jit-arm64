@@ -108,9 +108,9 @@
 //   start_pc = 0
 //   end_pc = 8
 //   insn_count = 24
-//   insn_pcs = 32
-//   code_rx = 37192
-//   entry_thunks_offset = 37232
+//   insn_pcs = 32 (pointer, C-side only)
+//   code_rx = 352
+//   entry_thunks_offset = 392
 // cpu_state:
 //   regs = 16
 //   sp = 264
@@ -289,12 +289,12 @@
 .endm
 
 .macro JIT_BLOCK_ENTRY_TARGET_FROM_INDEX_OR_FAIL block, index, out, scratchx, scratchw, fail_label
-    mov \scratchx, #0x9170            // block->entry_thunks_offset
+    mov \scratchx, #392              // block->entry_thunks_offset
     add \scratchx, \block, \scratchx
     ldr \scratchw, [\scratchx]
     cmn \scratchw, #1
     b.eq \fail_label
-    mov \out, #0x9148                 // block->code_rx
+    mov \out, #352                   // block->code_rx
     ldr \out, [\block, \out]
     cbz \out, \fail_label
     add \out, \out, \scratchx
@@ -958,7 +958,8 @@ _arm64_jit_mem_lookup_page_live_dead_draft:
 //   x0 = rt*
 //   x1 = packed guest_pc/metadata; guest_pc is in the high 32 bits
 //   x2 = guest_addr
-//   x4 = access_kind (MEM_READ=0, MEM_WRITE=1)
+//   x3 = bytes of caller helper frame to discard on fault exit
+//   x16 = access_kind (MEM_READ=0, MEM_WRITE=1)
 // Outputs on success:
 //   x0 = host_page_base
 //   x1 = original packed guest_pc/metadata
@@ -975,9 +976,10 @@ _arm64_jit_mem_lookup_page_live:
     stp x10, x11, [sp, #128]
     stp x12, x13, [sp, #144]
     stp x14, x15, [sp, #160]
+    str x3, [sp, #64]              // caller frame unwind size for fault exit
     stp x0, x1, [sp, #80]          // rt*, guest_pc
     str x2, [sp, #96]              // guest_addr
-    str x4, [sp, #104]             // access_kind
+    str x16, [sp, #104]            // access_kind
 
     mov x3, x2                     // guest_addr scratch
     ldr x0, [x0, #8]               // tlb*
@@ -1044,6 +1046,15 @@ _arm64_jit_mem_lookup_page_live:
     str x0, [x16, #80]             // rt->debug2 = host_page_base
     b 5f
 2:
+    str x5, [sp, #72]              // profile base across spill/C miss handler
+    // Restore cached guest registers before invoking the fragment spill
+    // snippet; helper scratch use may have clobbered x4-x15.
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    ldp x8, x9, [sp, #112]
+    ldp x10, x11, [sp, #128]
+    ldp x12, x13, [sp, #144]
+    ldp x14, x15, [sp, #160]
     ldr x0, [sp, #80]              // rt*
     ldr x16, [x0, #24]             // spill_state_fn
     cbz x16, 6f
@@ -1053,7 +1064,6 @@ _arm64_jit_mem_lookup_page_live:
     ldr x6, [x0, #8]               // tlb*
     ldr x1, [sp, #96]              // guest_addr
     ldr x2, [sp, #104]             // access_kind
-    str x5, [sp, #72]              // profile base across C miss handler
     mov x0, x6                     // tlb*
     bl _tlb_handle_miss
     ldr x5, [sp, #72]              // profile base
@@ -1083,6 +1093,15 @@ _arm64_jit_mem_lookup_page_live:
     str x0, [x16, #80]             // rt->debug2 = host_page_base
     b 5f
 3:
+    // Same as the miss path: publish architectural state from the cached
+    // register values that were live at shared-helper entry, not from helper
+    // scratch temporaries.
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    ldp x8, x9, [sp, #112]
+    ldp x10, x11, [sp, #128]
+    ldp x12, x13, [sp, #144]
+    ldp x14, x15, [sp, #160]
     ldr x0, [sp, #80]              // rt*
     ldr x16, [x0, #24]             // spill_state_fn
     cbz x16, 4f
@@ -1107,6 +1126,7 @@ _arm64_jit_mem_lookup_page_live:
     mov x6, #0x31
     str x6, [x0, #72]              // rt->debug1 = miss-fault
     mov x0, #13
+    ldr x3, [sp, #64]              // caller frame unwind size
     ldp x6, x7, [sp, #48]
     ldp x4, x5, [sp, #32]
     ldp x8, x9, [sp, #112]
@@ -1115,6 +1135,7 @@ _arm64_jit_mem_lookup_page_live:
     ldp x14, x15, [sp, #160]
     ldp x16, x17, [sp, #16]
     ldp x29, x30, [sp], #176
+    add sp, sp, x3
     JIT_FRAGMENT_EPILOGUE_AND_RET
 5:
     ldr x1, [sp, #88]              // original packed guest_pc/metadata
@@ -1356,8 +1377,10 @@ _arm64_jit_helper_ldr_imm_unsigned_live:
     cmp x17, #0xfff
     bhi 90f
 
+    ldr x1, [sp, #48]              // packed1_live already has guest_pc in high 32
     mov x0, x21
-    mov x4, #0
+    mov x16, #0
+    mov x3, #80
     bl _arm64_jit_mem_lookup_page_live
     ldr x1, [sp, #48]              // packed1
     ldr x3, [sp, #56]              // store_in_x1
@@ -1653,8 +1676,12 @@ _arm64_jit_helper_str_imm_unsigned_live:
     cmp x17, #0xfff
     bhi 90f
 
+    ldr x1, [sp, #48]              // packed has guest_pc in low 32
+    ubfx x1, x1, #0, #32
+    lsl x1, x1, #32                // shared fault path expects guest_pc in high 32
     mov x0, x21
-    mov x4, #1
+    mov x16, #1
+    mov x3, #80
     bl _arm64_jit_mem_lookup_page_live
     ldr x1, [sp, #48]              // packed
     ldr x3, [sp, #56]              // store value
@@ -2369,6 +2396,7 @@ _arm64_jit_helper_ldst_imm9_store_slow:
     bl _arm64_jit_c_ldst_imm9
     cmp w0, #-1
     b.eq 2f
+    ldp x29, x30, [sp], #32
     JIT_FRAGMENT_EPILOGUE_AND_RET
 2:
     ldr x17, [x21, #32]            // reload_state_fn
@@ -2512,15 +2540,16 @@ _arm64_jit_helper_ldst_imm9_live:
     ubfx x17, x17, #30, #2         // size
 
     and x0, x2, #0xfff
-    mov x4, #1
-    lsl x4, x4, x17
-    sub x4, x4, #1
-    add x0, x0, x4
+    mov x16, #1
+    lsl x16, x16, x17
+    sub x16, x16, #1
+    add x0, x0, x16
     cmp x0, #0xfff
     bhi 90f
 
     mov x0, x21
-    mov x4, #1
+    mov x16, #1
+    mov x3, #64
     bl _arm64_jit_mem_lookup_page_live
     ldp x1, x3, [sp, #16]
     and x17, x2, #0xfff
@@ -2664,15 +2693,16 @@ _arm64_jit_helper_ldst_imm9_load_live:
     ubfx x17, x17, #30, #2         // size
 
     and x0, x2, #0xfff
-    mov x4, #1
-    lsl x4, x4, x17
-    sub x4, x4, #1
-    add x0, x0, x4
+    mov x16, #1
+    lsl x16, x16, x17
+    sub x16, x16, #1
+    add x0, x0, x16
     cmp x0, #0xfff
     bhi 90f
 
     mov x0, x21
-    mov x4, #0
+    mov x16, #0
+    mov x3, #64
     bl _arm64_jit_mem_lookup_page_live
     ldp x1, x3, [sp, #16]
     and x17, x2, #0xfff
@@ -2997,10 +3027,12 @@ _arm64_jit_helper_ldst_regoff_live:
 
     ldr x1, [sp, #40]              // packed
     mov x0, x21
-    mov x4, #1
+    mov x16, #1
+    mov x3, #176
     bl _arm64_jit_mem_lookup_page_live
     ldr x1, [sp, #40]              // packed
     ldr x3, [sp, #56]              // store value
+    ldr x2, [sp, #48]              // guest_addr restored after shared helper
     ldr w16, [sp, #40]             // insn low 32
     ubfx x17, x16, #30, #2         // size
     and x6, x2, #0xfff
@@ -3203,10 +3235,12 @@ _arm64_jit_helper_ldst_regoff_load_live:
 
     ldr x1, [sp, #40]              // packed
     mov x0, x21
-    mov x4, #0
+    mov x16, #0
+    mov x3, #176
     bl _arm64_jit_mem_lookup_page_live
     ldr x1, [sp, #40]              // packed
     ldr x3, [sp, #56]              // store_in_x1
+    ldr x2, [sp, #48]              // guest_addr restored after shared helper
     ldr w16, [sp, #40]             // insn low 32
     ubfx x17, x16, #30, #2         // size
     and x6, x2, #0xfff
@@ -3742,7 +3776,8 @@ _arm64_jit_helper_ldst_pair_load_live:
 80:
     ldr x1, [sp, #40]              // packed
     mov x0, x21
-    mov x4, #0
+    mov x16, #0
+    mov x3, #176
     bl _arm64_jit_mem_lookup_page_live
     b 81b
 90:
@@ -3894,7 +3929,8 @@ _arm64_jit_helper_ldst_pair_store_live:
 80:
     ldr x1, [sp, #40]              // packed
     mov x0, x21
-    mov x4, #1
+    mov x16, #1
+    mov x3, #176
     bl _arm64_jit_mem_lookup_page_live
     b 81b
 90:
@@ -3973,17 +4009,18 @@ _arm64_jit_helper_ldst_pair_vec_live:
 
     mov x3, #4
     lsl x3, x3, x17                // elem size = 4/8/16
-    and x4, x2, #0xfff
-    lsl x5, x3, #1                 // pair width
-    sub x5, x5, #1
-    add x4, x4, x5
-    cmp x4, #0xfff
+    and x0, x2, #0xfff
+    lsl x17, x3, #1                // pair width
+    sub x17, x17, #1
+    add x0, x0, x17
+    cmp x0, #0xfff
     bhi 90f
 
     ldr w17, [sp, #104]
-    ubfx x4, x17, #22, #1          // L -> access_kind
+    ubfx x16, x17, #22, #1         // L -> access_kind
     ldr x1, [sp, #104]             // packed
     mov x0, x21
+    mov x3, #128
     bl _arm64_jit_mem_lookup_page_live
     and x5, x2, #0xfff
     add x5, x0, x5                 // host ptr
@@ -4113,7 +4150,6 @@ _arm64_jit_helper_ldst_pair_vec_live:
 
 JITABI_C_HELPER_WRAP1 _arm64_jit_helper_unsupported_jitabi, _arm64_jit_helper_unsupported
 JITABI_C_HELPER_WRAP1 _arm64_jit_helper_syscall_jitabi, _arm64_jit_helper_syscall
-JITABI_C_HELPER_WRAP1 _arm64_jit_helper_timer_jitabi, _arm64_jit_helper_timer
 .globl _arm64_jit_helper_verify_trap_jitabi
 _arm64_jit_helper_verify_trap_jitabi:
     stp x29, x30, [sp, #-48]!
@@ -4579,7 +4615,7 @@ JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_ldst_imm9_success_jitabi, _arm64
 JITABI_C_HELPER_WRAP2 _arm64_jit_helper_ldst_regoff_jitabi, _arm64_jit_helper_ldst_regoff
 JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_ldst_regoff_success_jitabi, _arm64_jit_helper_ldst_regoff
 JITABI_C_HELPER_WRAP2 _arm64_jit_helper_ldst_pair_jitabi, _arm64_jit_helper_ldst_pair
-JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_ldst_pair_success_jitabi, _arm64_jit_helper_ldst_pair
+JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_ldst_pair_success_jitabi, _arm64_jit_c_ldst_pair
 JITABI_C_HELPER_WRAP2 _arm64_jit_helper_simd_ldst_imm_unsigned_jitabi, _arm64_jit_helper_simd_ldst_imm_unsigned
 JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_simd_ldst_multi_success_jitabi, _arm64_jit_c_simd_ldst_multi
 JITABI_C_HELPER_SUCCESS_WRAP2 _arm64_jit_helper_simd_ldst_imm_unsigned_success_jitabi, _arm64_jit_helper_simd_ldst_imm_unsigned
