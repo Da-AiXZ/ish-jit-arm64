@@ -412,12 +412,14 @@ timeout 20s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_DUMP=1 \
 
 ### Render a dumped fragment
 
+Current JIT dump JSON carries each guest instruction word and PC. Prefer
+dump-only rendering for normal analysis; the renderer disassembles the dumped
+raw guest words directly with Capstone, so it does not depend on an outer
+ELF/base guess for the primary guest instruction annotation.
+
 ```bash
 python3 -u tools/render_arm64_jit_dump.py \
-  /private/tmp/fragment.log \
-  /Users/zizhengguo/scratch/ish-arm64/benchmark/assets/cbench_lite_arm64 \
-  0xeffdd000 \
-  > /private/tmp/fragment.rendered
+  /private/tmp/fragment.log
 ```
 
 ### Extract a specific fragment by guest start PC
@@ -532,9 +534,11 @@ Current indexed scalar-pair rule:
   fall back to the C helper.
 - Exclusive/acquire-release memory is split by semantic risk. Common
   single-register `LDXR`/`LDAXR` TLB-hit cases are lowered inline and publish
-  `cpu->excl_addr`/`cpu->excl_val`; `STXR`/`STLXR`, acquire/release
-  non-exclusive forms, and pair-exclusive forms still go through the C helper
-  until their CAS/status-writeback path has a dedicated fast helper.
+  `cpu->excl_addr`/`cpu->excl_val`. Common single-register `STXR`/`STLXR`
+  TLB-hit cases are also lowered inline with host `CAS`/`CASAL`, preserve
+  NZCV, clear `cpu->excl_addr`, and write the status result to a cached `Rs` or
+  canonical CPU state. Acquire/release non-exclusive forms and pair-exclusive
+  forms still go through the C helper.
 
 ## Current Fragment Lookup Direction
 

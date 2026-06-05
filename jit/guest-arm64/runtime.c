@@ -383,26 +383,6 @@ static bool arm64_jit_should_dump_block(const struct arm64_jit_block *block) {
     return false;
 }
 
-static void arm64_jit_dump_json_string(FILE *out, const char *s) {
-    fputc('"', out);
-    for (const unsigned char *p = (const unsigned char *) s; *p; p++) {
-        switch (*p) {
-            case '\\': fputs("\\\\", out); break;
-            case '"': fputs("\\\"", out); break;
-            case '\n': fputs("\\n", out); break;
-            case '\r': fputs("\\r", out); break;
-            case '\t': fputs("\\t", out); break;
-            default:
-                if (*p < 0x20)
-                    fprintf(out, "\\u%04x", *p);
-                else
-                    fputc(*p, out);
-                break;
-        }
-    }
-    fputc('"', out);
-}
-
 static void arm64_jit_dump_block_json(const struct arm64_jit_block *block) {
     if (!arm64_jit_should_dump_block(block))
         return;

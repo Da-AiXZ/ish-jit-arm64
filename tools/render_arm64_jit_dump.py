@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+
 
 PREFIX = "[arm64-jit-dump] "
 
@@ -24,27 +26,7 @@ def parse_dump_lines(path):
     return records
 
 
-def disassemble_guest(binary_path, start_pc, end_pc, guest_base):
-    start = start_pc - guest_base
-    stop = end_pc
-    out = run_cmd([
-        "objdump", "-d",
-        f"--start-address=0x{start:x}",
-        f"--stop-address=0x{stop - guest_base:x}",
-        binary_path,
-    ])
-    mapping = {}
-    for line in out.splitlines():
-        m = re.match(r"^\s*([0-9a-f]+):\s+([0-9a-f]{8})\s+(.*)$", line)
-        if not m:
-            continue
-        off = int(m.group(1), 16)
-        pc = guest_base + off
-        mapping[pc] = f"0x{pc:016x}: {m.group(3).strip()}"
-    return mapping
-
-
-def disassemble_host_words(words):
+def disassemble_words(words):
     with tempfile.TemporaryDirectory(prefix="jitdump-host-") as td:
         asm = os.path.join(td, "frag.s")
         obj = os.path.join(td, "frag.o")
@@ -69,7 +51,32 @@ def disassemble_host_words(words):
     return host
 
 
-def render_record(rec, guest_map):
+def disassemble_dump_guest_insns(rec):
+    mapping = {}
+    md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+    for insn in rec["guest_insns"]:
+        pc = int(insn["pc"], 16)
+        word = int(insn["insn"], 16) if isinstance(insn["insn"], str) else int(insn["insn"])
+        raw = word.to_bytes(4, byteorder="little")
+        decoded = list(md.disasm(raw, pc, count=1))
+        if decoded:
+            i = decoded[0]
+            asm = i.mnemonic if not i.op_str else f"{i.mnemonic}\t{i.op_str}"
+        else:
+            asm = "<undisassembled>"
+        mapping[pc] = (word, asm)
+    return mapping
+
+
+def format_guest_insn(pc, dump_map):
+    dump = dump_map.get(pc)
+    if dump is None:
+        return f"0x{pc:016x}: <missing dump insn>"
+    dump_word, dump_asm = dump
+    return f"0x{pc:016x}: {dump_asm}    ; dump=0x{dump_word:08x}"
+
+
+def render_record(rec):
     print(f"# fragment {rec['start_pc']}..{rec['end_pc']}")
     if rec["gpr_map"]:
         regs = " ".join(
@@ -80,14 +87,15 @@ def render_record(rec, guest_map):
     print(f"# register relation {regs}")
     print(f"# guest code segment at time of execution {rec['start_pc']}-{rec['end_pc']}")
     print(f"# host body bytes {rec['body_code_size']} total bytes {rec['code_size']}")
-    host_map = disassemble_host_words(rec["host_words"])
+    host_map = disassemble_words(rec["host_words"])
+    dump_guest_map = disassemble_dump_guest_insns(rec)
 
     host_offs = [insn["host_off"] for insn in rec["guest_insns"]]
     body_end = rec["body_code_size"]
     for idx, insn in enumerate(rec["guest_insns"]):
         pc = int(insn["pc"], 16)
         print()
-        print(f"# {guest_map.get(pc, insn['pc'])}")
+        print(f"# {format_guest_insn(pc, dump_guest_map)}")
         start = insn["host_off"]
         if start == 0xFFFFFFFF:
             continue
@@ -107,7 +115,7 @@ def render_record(rec, guest_map):
             if insn["entry_off"] == 0xFFFFFFFF:
                 continue
             pc = int(insn["pc"], 16)
-            print(f"# entry for {guest_map.get(pc, insn['pc'])}")
+            print(f"# entry for {format_guest_insn(pc, dump_guest_map)}")
             off = insn["entry_off"]
             for x in range(off, min(off + 18 * 4 + 8, rec["code_size"]), 4):
                 asm = host_map.get(x, "<undisassembled>")
@@ -115,21 +123,16 @@ def render_record(rec, guest_map):
 
 
 def main():
-    if len(sys.argv) != 4:
-        print("usage: render_arm64_jit_dump.py <dump.log> <guest-binary> <guest-base-hex>", file=sys.stderr)
+    if len(sys.argv) != 2:
+        print("usage: render_arm64_jit_dump.py <dump.log>", file=sys.stderr)
         return 1
     dump_path = sys.argv[1]
-    guest_binary = sys.argv[2]
-    guest_base = int(sys.argv[3], 16)
     records = parse_dump_lines(dump_path)
     if not records:
         print("no dump records found", file=sys.stderr)
         return 1
-    low = min(int(r["start_pc"], 16) for r in records)
-    high = max(int(r["end_pc"], 16) for r in records)
-    guest_map = disassemble_guest(guest_binary, low, high, guest_base)
     for rec in records:
-        render_record(rec, guest_map)
+        render_record(rec)
         print()
     return 0
 

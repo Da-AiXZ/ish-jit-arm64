@@ -58,12 +58,11 @@ when a task needs to be split.
     SP-vs-ZR semantics. Do not repeat the broad scratch-load/storeback attempt;
     it corrupted loader state and made `/bin/echo hello` print no `hello`.
   - Current memory fast paths cover the hot scalar regoff forms, SIMD imm9
-    signed-offset stores, LD-exclusive TLB hits, and scalar pair valid-form TLB
-    misses via the shared page helper.
-  - Latest profiled C-helper counts for `/sbin/apk stats`:
-    `imm9=6941`, `regoff=21749`, `pair=18059`, `excl=148956`.
-  - Remaining dominant memory C-helper volume is `STXR`/`STLXR` CAS/status
-    stores; implement a dedicated fast helper before trying to inline them.
+    signed-offset stores, single-register LD/ST-exclusive TLB hits, and scalar
+    pair valid-form TLB misses via the shared page helper.
+  - Latest profiled C-helper counts for `/sbin/apk stats` after the
+    single-register `STXR`/`STLXR` fast path:
+    `imm9=612`, `regoff=21796`, `pair=17672`, `excl=476`.
   - Remaining pair C-helper volume is mostly invalid/unmodeled forms such as
     vector pairs and base-overlap writeback pairs that still require full
     semantics. Non-overlap writeback stack pairs may use generic fallback, but
