@@ -11,6 +11,7 @@
  */
 
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 #include "emu/cpu.h"
 
@@ -226,24 +227,60 @@ void arm64_fcmp_d(struct cpu_state *cpu, int rn, int rm) {
 }
 
 // Conversions
+static uint32_t arm64_fcvtzs_f32_to_u32(float value) {
+    if (isnan(value))
+        return 0;
+    if (value >= 2147483647.0f)
+        return INT32_MAX;
+    if (value <= -2147483648.0f)
+        return (uint32_t) INT32_MIN;
+    return (uint32_t) (int32_t) truncf(value);
+}
+
+static uint32_t arm64_fcvtzs_f64_to_u32(double value) {
+    if (isnan(value))
+        return 0;
+    if (value >= 2147483647.0)
+        return INT32_MAX;
+    if (value <= -2147483648.0)
+        return (uint32_t) INT32_MIN;
+    return (uint32_t) (int32_t) trunc(value);
+}
+
+static uint64_t arm64_fcvtzs_f32_to_u64(float value) {
+    if (isnan(value))
+        return 0;
+    if (value >= 9223372036854775808.0f)
+        return INT64_MAX;
+    if (value <= -9223372036854775808.0f)
+        return (uint64_t) INT64_MIN;
+    return (uint64_t) (int64_t) truncf(value);
+}
+
+static uint64_t arm64_fcvtzs_f64_to_u64(double value) {
+    if (isnan(value))
+        return 0;
+    if (value >= 9223372036854775808.0)
+        return INT64_MAX;
+    if (value <= -9223372036854775808.0)
+        return (uint64_t) INT64_MIN;
+    return (uint64_t) (int64_t) trunc(value);
+}
+
 void arm64_fcvtzs_s_w(struct cpu_state *cpu, int rd, int rn) {
-    float a = cpu->fp[rn].f32[0];
-    cpu->regs[rd] = (int32_t)truncf(a);
+    cpu->regs[rd] = arm64_fcvtzs_f32_to_u32(cpu->fp[rn].f32[0]);
 }
 
 void arm64_fcvtzs_d_w(struct cpu_state *cpu, int rd, int rn) {
-    double a = cpu->fp[rn].f64[0];
-    cpu->regs[rd] = (int32_t)trunc(a);
+    cpu->regs[rd] = arm64_fcvtzs_f64_to_u32(cpu->fp[rn].f64[0]);
 }
 
 void arm64_fcvtzs_s_x(struct cpu_state *cpu, int rd, int rn) {
-    float a = cpu->fp[rn].f32[0];
-    cpu->regs[rd] = (int64_t)truncf(a);
+    cpu->regs[rd] = arm64_fcvtzs_f32_to_u64(cpu->fp[rn].f32[0]);
 }
 
 void arm64_fcvtzs_d_x(struct cpu_state *cpu, int rd, int rn) {
-    double a = cpu->fp[rn].f64[0];
-    cpu->regs[rd] = (int64_t)trunc(a);
+    cpu->regs[rd] = arm64_fcvtzs_f64_to_u64(cpu->fp[rn].f64[0]);
 }
 
 void arm64_scvtf_w_s(struct cpu_state *cpu, int rd, int rn) {

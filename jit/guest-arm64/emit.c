@@ -409,9 +409,6 @@ void arm64_jit_emit_spill_cached_state(struct arm64_jit_emitter *e) {
     arm64_jit_emit32(e, 0xd53b4410); // mrs x16, fpcr
     arm64_jit_emit32(e, arm64_jit_enc_str32_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_CPU,
             (CPU_OFFSET(fpcr) >> 2)));
-    arm64_jit_emit32(e, 0xd53b4430); // mrs x16, fpsr
-    arm64_jit_emit32(e, arm64_jit_enc_str32_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_CPU,
-            (CPU_OFFSET(fpsr) >> 2)));
     for (uint32_t v = 0; v < 32; v++) {
         arm64_jit_emit32(e, arm64_jit_enc_str128_uimm(v, ARM64_JIT_HOST_CPU,
                 ((CPU_OFFSET(fp[0]) >> 4) + v)));
@@ -1548,33 +1545,73 @@ static bool arm64_jit_emit_addsub_imm_cached(struct arm64_jit_emitter *e, uint32
     return true;
 }
 
+static void arm64_jit_emit_clear_scalar_s_upper(struct arm64_jit_emitter *e, uint32_t rd) {
+    arm64_jit_emit32(e, 0x1e260010u | ((rd & 0x1f) << 5)); // fmov w16, Sd
+    arm64_jit_emit32(e, 0x6f00e400u | (rd & 0x1f)); // movi Vd.2D, #0
+    arm64_jit_emit32(e, 0x1e270200u | (rd & 0x1f)); // fmov Sd, w16
+}
+
+static bool arm64_jit_is_scalar_fp_to_gpr_conversion(uint32_t insn) {
+    if ((insn & 0x7f20fc00u) != 0x1e200000u)
+        return false;
+    uint32_t ftype = (insn >> 22) & 0x3;
+    if (ftype > 1)
+        return false;
+    uint32_t rmode = (insn >> 19) & 0x3;
+    uint32_t opcode = (insn >> 16) & 0x7;
+    switch (rmode) {
+        case 0:
+            return opcode == 0 || opcode == 1 || opcode == 4 || opcode == 5; // FCVTN/FCVTA
+        case 1:
+            return opcode == 0 || opcode == 1; // FCVTP
+        case 2:
+            return opcode == 0 || opcode == 1; // FCVTM
+        case 3:
+            return opcode == 0 || opcode == 1; // FCVTZ
+        default:
+            return false;
+    }
+}
+
 static bool arm64_jit_emit_simd_fp_cached(struct arm64_jit_emitter *e, uint32_t insn) {
     uint32_t simd_rrr = insn & ~(((uint32_t) 0x1f) | ((uint32_t) 0x1f << 5) |
             ((uint32_t) 0x1f << 16));
 
     switch (simd_rrr) {
-        case 0x1e220800u: // FMUL Dd, Dn, Dm
-        case 0x1e600800u: // FMUL Dd, Dn, Dm
-        case 0x1e221800u: // FDIV Sd, Sn, Sm
-        case 0x1e601800u: // FDIV Dd, Dn, Dm
-        case 0x1e222800u: // FADD Sd, Sn, Sm
-        case 0x1e602800u: // FADD Dd, Dn, Dm
-        case 0x1e223800u: // FSUB Sd, Sn, Sm
-        case 0x1e603800u: // FSUB Dd, Dn, Dm
-        case 0x1e224800u: // FMAX Sd, Sn, Sm
-        case 0x1e604800u: // FMAX Dd, Dn, Dm
-        case 0x1e225800u: // FMIN Sd, Sn, Sm
-        case 0x1e605800u: // FMIN Dd, Dn, Dm
-        case 0x1e226800u: // FMAXNM Sd, Sn, Sm
-        case 0x1e606800u: // FMAXNM Dd, Dn, Dm
-        case 0x1e227800u: // FMINNM Sd, Sn, Sm
-        case 0x1e607800u: // FMINNM Dd, Dn, Dm
+        case 0x1e200800u: // FMUL Sd, Sn, Sm
+        case 0x1e201800u: // FDIV Sd, Sn, Sm
+        case 0x1e202800u: // FADD Sd, Sn, Sm
+        case 0x1e203800u: // FSUB Sd, Sn, Sm
+        case 0x1e204800u: // FMAX Sd, Sn, Sm
+        case 0x1e205800u: // FMIN Sd, Sn, Sm
+        case 0x1e206800u: // FMAXNM Sd, Sn, Sm
+        case 0x1e207800u: // FMINNM Sd, Sn, Sm
         case 0x1e220c00u: // FCSEL Sd, Sn, Sm, cond
+            arm64_jit_emit32(e, insn);
+            arm64_jit_emit_clear_scalar_s_upper(e, ARM64_RD(insn));
+            return true;
+        case 0x1e600800u: // FMUL Dd, Dn, Dm
+        case 0x1e601800u: // FDIV Dd, Dn, Dm
+        case 0x1e602800u: // FADD Dd, Dn, Dm
+        case 0x1e603800u: // FSUB Dd, Dn, Dm
+        case 0x1e604800u: // FMAX Dd, Dn, Dm
+        case 0x1e605800u: // FMIN Dd, Dn, Dm
+        case 0x1e606800u: // FMAXNM Dd, Dn, Dm
+        case 0x1e607800u: // FMINNM Dd, Dn, Dm
         case 0x1e600c00u: // FCSEL Dd, Dn, Dm, cond
             arm64_jit_emit32(e, insn);
             return true;
         default:
             break;
+    }
+    if ((insn & 0xffe00c00u) == 0x1e200c00u) { // FCSEL Sd, Sn, Sm, cond
+        arm64_jit_emit32(e, insn);
+        arm64_jit_emit_clear_scalar_s_upper(e, ARM64_RD(insn));
+        return true;
+    }
+    if ((insn & 0xffe00c00u) == 0x1e600c00u) { // FCSEL Dd, Dn, Dm, cond
+        arm64_jit_emit32(e, insn);
+        return true;
     }
     if ((insn & 0xfffffc00u) == 0x1e270000u || // FMOV Sd, Wn
             (insn & 0xfffffc00u) == 0x9e670000u) { // FMOV Dd, Xn
@@ -1642,12 +1679,25 @@ static bool arm64_jit_emit_simd_fp_cached(struct arm64_jit_emitter *e, uint32_t 
         arm64_jit_emit32(e, insn);
         return true;
     }
-    if ((insn & ~((uint32_t) 0x1f)) == 0x1e2c1000u) { // FMOV Sd, #imm
+    if ((insn & 0xffe01fe0u) == 0x1e201000u) { // FMOV Sd, #imm
         arm64_jit_emit32(e, insn);
         return true;
     }
-    if ((insn & ~((uint32_t) 0x1f)) == 0x1e6c1000u) { // FMOV Dd, #imm
+    if ((insn & 0xffe01fe0u) == 0x1e601000u) { // FMOV Dd, #imm
         arm64_jit_emit32(e, insn);
+        return true;
+    }
+    if (arm64_jit_is_scalar_fp_to_gpr_conversion(insn)) {
+        uint32_t rd = ARM64_RD(insn);
+        int dst = arm64_jit_host_reg_for_guest(e->block, rd);
+        if (dst >= 0 || rd >= 31) {
+            unsigned host_dst = (dst >= 0) ? (unsigned) dst : 31;
+            arm64_jit_emit32(e, (insn & ~((uint32_t) 0x1f)) | host_dst);
+            return true;
+        }
+        arm64_jit_emit32(e, (insn & ~((uint32_t) 0x1f)) | ARM64_JIT_HOST_HELPER0);
+        arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_CPU,
+                (CPU_OFFSET(regs[rd]) >> 3)));
         return true;
     }
     if ((insn & 0xfffffc00u) == 0x1e20c000u) { // FABS Sd, Sn
@@ -1674,6 +1724,15 @@ static bool arm64_jit_emit_simd_fp_cached(struct arm64_jit_emitter *e, uint32_t 
         arm64_jit_emit32(e, insn);
         return true;
     }
+    if ((insn & 0xff208000u) == 0x1f000000u) { // FMADD/FMSUB/FNMADD/FNMSUB Sd/Dd
+        uint32_t ftype = (insn >> 22) & 0x3;
+        if (ftype == 0 || ftype == 1) {
+            arm64_jit_emit32(e, insn);
+            if (ftype == 0)
+                arm64_jit_emit_clear_scalar_s_upper(e, ARM64_RD(insn));
+            return true;
+        }
+    }
     switch (insn & ~(((uint32_t) 0x1f) | ((uint32_t) 0x1f << 5))) {
         case 0x1e220000u: // SCVTF Sd, Wn
         case 0x1e620000u: // SCVTF Dd, Wn
@@ -1682,25 +1741,44 @@ static bool arm64_jit_emit_simd_fp_cached(struct arm64_jit_emitter *e, uint32_t 
         case 0x1e230000u: // UCVTF Sd, Wn
         case 0x1e630000u: // UCVTF Dd, Wn
         case 0x9e230000u: // UCVTF Sd, Xn
-        case 0x9e630000u: // UCVTF Dd, Xn
-            arm64_jit_emit32(e, insn);
+        case 0x9e630000u: { // UCVTF Dd, Xn
+            uint32_t rn = ARM64_RN(insn);
+            int src = arm64_jit_guest_src_host_reg_or_zr(e->block, rn);
+            if (src < 0) {
+                if (rn >= 31)
+                    src = 31;
+                else {
+                    src = ARM64_JIT_HOST_HELPER0;
+                    arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm((unsigned) src, ARM64_JIT_HOST_CPU,
+                            (CPU_OFFSET(regs[rn]) >> 3)));
+                }
+            }
+            arm64_jit_emit32(e, (insn & ~((uint32_t) 0x1f << 5)) | ((uint32_t) src << 5));
             return true;
+        }
         default:
             break;
     }
-    if ((insn & 0xfffffc1fu) == 0x1e212000u) { // FCMP Sn, Sm
+    if ((insn & 0xffe0fc1fu) == 0x1e202000u) { // FCMP Sn, Sm
         arm64_jit_emit32(e, insn);
         return true;
     }
-    if ((insn & 0xfffffc1fu) == 0x1e612000u) { // FCMP Dn, Dm
+    if ((insn & 0xffe0fc1fu) == 0x1e602000u) { // FCMP Dn, Dm
         arm64_jit_emit32(e, insn);
         return true;
     }
-    if ((insn & 0xfffffc1fu) == 0x1e222030u) { // FCMPE Sn, Sm
+    if ((insn & 0xffe0fc1fu) == 0x1e202010u) { // FCMPE Sn, Sm
         arm64_jit_emit32(e, insn);
         return true;
     }
-    if ((insn & 0xfffffc1fu) == 0x1e622030u) { // FCMPE Dn, Dm
+    if ((insn & 0xffe0fc1fu) == 0x1e602010u) { // FCMPE Dn, Dm
+        arm64_jit_emit32(e, insn);
+        return true;
+    }
+    if ((insn & 0xfffffc1fu) == 0x1e202008u || // FCMP Sn, #0.0
+            (insn & 0xfffffc1fu) == 0x1e602008u || // FCMP Dn, #0.0
+            (insn & 0xfffffc1fu) == 0x1e202018u || // FCMPE Sn, #0.0
+            (insn & 0xfffffc1fu) == 0x1e602018u) { // FCMPE Dn, #0.0
         arm64_jit_emit32(e, insn);
         return true;
     }
@@ -1947,6 +2025,20 @@ static bool arm64_jit_emit_simd_fp_cached(struct arm64_jit_emitter *e, uint32_t 
             arm64_jit_emit32(e, insn);
             return true;
         }
+    }
+    if ((insn & 0xbfbffc00u) == 0x0ea0f800u || // FABS Vd.2S/4S/2D, Vn
+            (insn & 0xbfbffc00u) == 0x2ea0f800u) { // FNEG Vd.2S/4S/2D, Vn
+        uint32_t size = (insn >> 22) & 0x3;
+        uint32_t q = (insn >> 30) & 1;
+        if (size == 2 || (size == 3 && q)) {
+            arm64_jit_emit32(e, insn);
+            return true;
+        }
+    }
+    if ((insn & 0xdfbffc00u) == 0x5e21d800u || // SCVTF/UCVTF SIMD scalar integer
+            (insn & 0xdfbffc00u) == 0x5ea1b800u) { // FCVTZS/FCVTZU SIMD scalar integer
+        arm64_jit_emit32(e, insn);
+        return true;
     }
     if ((insn & 0xffffcc00u) == 0x5e280800u) { // SHA1H/SHA1SU1/SHA256SU0
         uint32_t opcode = (insn >> 12) & 0x3;

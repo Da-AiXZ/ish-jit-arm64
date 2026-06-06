@@ -11803,49 +11803,6 @@ make_rounding_sra ursra, "urshl v3.8b, v0.8b, v1.8b", "urshl v3.16b, v0.16b, v1.
     str xzr, [x15, #8]
     gret
 
-/*
- * FCVTZU - Floating-point to unsigned integer (round toward zero)
- */
-.gadget fcvtzu_scalar
-    ldr x8, [_pc]
-    add _pc, _pc, #8
-
-    and x9, x8, #0x1f       // rd (gpr)
-    ubfx x10, x8, #8, #5    // rn (fp reg)
-    ubfx x11, x8, #16, #2   // type
-    ubfx x12, x8, #18, #1   // sf
-
-    // Load FP value
-    add x13, _cpu, #CPU_fp
-    lsl x14, x10, #4
-    add x13, x13, x14
-
-    cbz x11, .Lfcvtzu_single
-    // type=1: double
-    ldr d0, [x13]
-    b .Lfcvtzu_convert
-
-.Lfcvtzu_single:
-    ldr s0, [x13]
-    fcvt d0, s0             // convert to double for uniform handling
-
-.Lfcvtzu_convert:
-    fcvtzu x14, d0          // convert to unsigned 64-bit
-
-    cbz x12, .Lfcvtzu_32bit
-    b .Lfcvtzu_store
-
-.Lfcvtzu_32bit:
-    and x14, x14, #0xffffffff
-
-.Lfcvtzu_store:
-    cmp x9, #31
-    b.eq .Lfcvtzu_done      // XZR - discard
-    add x15, _cpu, #CPU_x0
-    str x14, [x15, x9, lsl #3]
-.Lfcvtzu_done:
-    gret
-
 // Macro for FCVT (FP->int) with different rounding modes
 // \name: gadget name suffix, \cvt_x_d: 64-bit convert insn, \cvt_w_d: 32-bit convert insn
 .macro make_fcvt_to_int name, cvt_x_d, cvt_w_d, cvt_x_s, cvt_w_s
@@ -11898,49 +11855,8 @@ make_fcvt_to_int fcvtpu, fcvtpu, fcvtpu, fcvtpu, fcvtpu
 make_fcvt_to_int fcvtmu, fcvtmu, fcvtmu, fcvtmu, fcvtmu
 make_fcvt_to_int fcvtas, fcvtas, fcvtas, fcvtas, fcvtas
 make_fcvt_to_int fcvtau, fcvtau, fcvtau, fcvtau, fcvtau
-
-/*
- * FCVTZS - Floating-point to signed integer (round toward zero)
- * (kept for backward compatibility — same as make_fcvt_to_int but uses fcvtzs)
- */
-.gadget fcvtzs_scalar
-    ldr x8, [_pc]
-    add _pc, _pc, #8
-
-    and x9, x8, #0x1f       // rd (gpr)
-    ubfx x10, x8, #8, #5    // rn (fp reg)
-    ubfx x11, x8, #16, #2   // type
-    ubfx x12, x8, #18, #1   // sf
-
-    add x13, _cpu, #CPU_fp
-    lsl x14, x10, #4
-    add x13, x13, x14
-
-    cbz x11, .Lfcvtzs_single
-    ldr d0, [x13]
-    b .Lfcvtzs_convert
-
-.Lfcvtzs_single:
-    ldr s0, [x13]
-    fcvt d0, s0
-
-.Lfcvtzs_convert:
-    fcvtzs x14, d0
-
-    cbz x12, .Lfcvtzs_32bit
-    b .Lfcvtzs_store
-
-.Lfcvtzs_32bit:
-    // Truncate to 32-bit signed
-    sxtw x14, w14
-
-.Lfcvtzs_store:
-    cmp x9, #31
-    b.eq .Lfcvtzs_done
-    add x15, _cpu, #CPU_x0
-    str x14, [x15, x9, lsl #3]
-.Lfcvtzs_done:
-    gret
+make_fcvt_to_int fcvtzs, fcvtzs, fcvtzs, fcvtzs, fcvtzs
+make_fcvt_to_int fcvtzu, fcvtzu, fcvtzu, fcvtzu, fcvtzu
 
 /*
  * FCVTZS (GPR, fixed-point) - FP to signed int with scale factor (result in GPR)

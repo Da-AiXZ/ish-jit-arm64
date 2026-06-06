@@ -1860,8 +1860,6 @@ static struct cpu_state arm64_jit_capture_verify_cpu(const struct arm64_jit_bloc
     arm64_set_nzcv(&captured, captured.nzcv);
     for (uint32_t i = 0; i < 32; i++)
         captured.fp[i].q = uc->uc_mcontext->__ns.__v[i];
-    captured.fpsr = uc->uc_mcontext->__ns.__fpsr;
-    captured.fpcr = uc->uc_mcontext->__ns.__fpcr;
 #endif
     return captured;
 }
@@ -4578,6 +4576,63 @@ static void arm64_jit_record_gpr_use(struct arm64_jit_insn_info *info, uint32_t 
     }
 }
 
+static bool arm64_jit_is_scalar_fp_to_gpr_conversion(uint32_t insn) {
+    if ((insn & 0x7f20fc00u) != 0x1e200000u)
+        return false;
+    uint32_t ftype = (insn >> 22) & 0x3;
+    if (ftype > 1)
+        return false;
+    uint32_t rmode = (insn >> 19) & 0x3;
+    uint32_t opcode = (insn >> 16) & 0x7;
+    switch (rmode) {
+        case 0:
+            return opcode == 0 || opcode == 1 || opcode == 4 || opcode == 5; // FCVTN/FCVTA
+        case 1:
+            return opcode == 0 || opcode == 1; // FCVTP
+        case 2:
+            return opcode == 0 || opcode == 1; // FCVTM
+        case 3:
+            return opcode == 0 || opcode == 1; // FCVTZ
+        default:
+            return false;
+    }
+}
+
+static void arm64_jit_analyze_simd_fp_gpr_use(uint32_t insn, struct arm64_jit_insn_info *info) {
+    if ((insn & 0xfffffc00u) == 0x1e270000u || // FMOV Sd, Wn
+            (insn & 0xfffffc00u) == 0x9e670000u || // FMOV Dd, Xn
+            (insn & 0xfffffc00u) == 0x9eaf0000u || // FMOV Vd.D[1], Xn
+            (insn & 0xbfe0fc00u) == 0x0e000c00u || // DUP (general)
+            (insn & 0xffe0fc00u) == 0x4e001c00u || // MOV Vd.D/H/B[idx], GPR
+            (insn & 0xffe7fc00u) == 0x4e041c00u) { // MOV Vd.S[idx], Wn
+        arm64_jit_record_gpr_use(info, ARM64_RN(insn), ARM64_JIT_USE_READ);
+    }
+
+    switch (insn & ~(((uint32_t) 0x1f) | ((uint32_t) 0x1f << 5))) {
+        case 0x1e220000u: // SCVTF Sd, Wn
+        case 0x1e620000u: // SCVTF Dd, Wn
+        case 0x9e220000u: // SCVTF Sd, Xn
+        case 0x9e620000u: // SCVTF Dd, Xn
+        case 0x1e230000u: // UCVTF Sd, Wn
+        case 0x1e630000u: // UCVTF Dd, Wn
+        case 0x9e230000u: // UCVTF Sd, Xn
+        case 0x9e630000u: // UCVTF Dd, Xn
+            arm64_jit_record_gpr_use(info, ARM64_RN(insn), ARM64_JIT_USE_READ);
+            break;
+        default:
+            break;
+    }
+
+    if ((insn & 0xfffffc00u) == 0x1e260000u || // FMOV Wd, Sn
+            (insn & 0xfffffc00u) == 0x9e660000u || // FMOV Xd, Dn
+            (insn & 0xfffffc00u) == 0x9eae0000u || // FMOV Xd, Vn.D[1]
+            (insn & 0xffe0fc00u) == 0x4e003c00u || // MOV Xd, Vn.D[0]
+            (insn & 0xbfe0fc00u) == 0x0e003c00u || // UMOV/MOV scalar to GPR
+            arm64_jit_is_scalar_fp_to_gpr_conversion(insn)) {
+        arm64_jit_record_gpr_use(info, ARM64_RD(insn), ARM64_JIT_USE_WRITE);
+    }
+}
+
 bool arm64_jit_analyze_insn(uint32_t insn, struct arm64_jit_insn_info *info) {
     memset(info, 0, sizeof(*info));
     info->type = arm64_classify_insn(insn);
@@ -4682,6 +4737,7 @@ bool arm64_jit_analyze_insn(uint32_t insn, struct arm64_jit_insn_info *info) {
             return true;
         }
         case INSN_SIMD_FP:
+            arm64_jit_analyze_simd_fp_gpr_use(insn, info);
             return true;
         default:
             return false;

@@ -4017,7 +4017,8 @@ _arm64_jit_helper_ldst_pair_vec_live:
     bhi 90f
 
     ldr w17, [sp, #104]
-    ubfx x16, x17, #22, #1         // L -> access_kind
+    ubfx x16, x17, #22, #1         // L
+    eor x16, x16, #1               // access_kind: 0=read, 1=write
     ldr x1, [sp, #104]             // packed
     mov x0, x21
     mov x3, #128
