@@ -149,6 +149,8 @@ struct arm64_jit_block {
     uint32_t light_spill_code_offset;
     struct arm64_jit_code_slab *code_slab;
     uint32_t code_slab_offset;
+    uint32_t exit_epilogue_branch_count;
+    uint32_t exit_epilogue_branches[ARM64_JIT_MAX_FIXUPS];
 };
 
 struct arm64_jit_entrypoint {

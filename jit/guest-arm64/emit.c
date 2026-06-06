@@ -468,6 +468,9 @@ static void arm64_jit_emit_state_snippet_ret(struct arm64_jit_emitter *e) {
 }
 
 static void arm64_jit_patch_cond_branch_to_here(struct arm64_jit_emitter *e, uint32_t branch_off);
+static void arm64_jit_emit_exit_epilogue_branch(struct arm64_jit_emitter *e);
+static void arm64_jit_patch_exit_epilogue_branches(struct arm64_jit_emitter *e,
+        uint32_t epilogue_off);
 
 static void arm64_jit_emit_c_entry_snippet(struct arm64_jit_emitter *e) {
     arm64_jit_emit_prologue(e);
@@ -512,7 +515,7 @@ void arm64_jit_emit_helper_return(struct arm64_jit_emitter *e, void *helper, add
     arm64_jit_emit32(e, arm64_jit_enc_mov_reg(0, 21));
     arm64_jit_emit_load_imm64(e, 16, (uint64_t) helper);
     arm64_jit_emit32(e, arm64_jit_enc_blr(16));
-    arm64_jit_emit_epilogue(e);
+    arm64_jit_emit_exit_epilogue_branch(e);
 }
 
 static void arm64_jit_emit_control_transfer_fast_return(struct arm64_jit_emitter *e,
@@ -523,7 +526,7 @@ static void arm64_jit_emit_control_transfer_fast_return(struct arm64_jit_emitter
     arm64_jit_emit32(e, arm64_jit_enc_mov_reg(0, 21));
     arm64_jit_emit_load_imm64(e, 16, (uint64_t) arm64_jit_helper_control_transfer_fast_jitabi);
     arm64_jit_emit32(e, arm64_jit_enc_blr(16));
-    arm64_jit_emit_epilogue(e);
+    arm64_jit_emit_exit_epilogue_branch(e);
 }
 
 static void arm64_jit_emit_control_transfer_fast_return_imm(struct arm64_jit_emitter *e,
@@ -569,7 +572,7 @@ static void arm64_jit_emit_helper_return_branch_reg_fast(struct arm64_jit_emitte
     arm64_jit_emit32(e, arm64_jit_enc_mov_reg(0, 21));
     arm64_jit_emit_load_imm64(e, 16, (uint64_t) arm64_jit_helper_branch_reg_fast_jitabi);
     arm64_jit_emit32(e, arm64_jit_enc_blr(16));
-    arm64_jit_emit_epilogue(e);
+    arm64_jit_emit_exit_epilogue_branch(e);
 }
 
 static void arm64_jit_emit_helper_success_regarg(struct arm64_jit_emitter *e, void *helper,
@@ -889,6 +892,33 @@ static void arm64_jit_patch_b_to_here(struct arm64_jit_emitter *e, uint32_t bran
     uint32_t *slot = (uint32_t *) (e->buf + branch_off);
     int32_t byte_delta = (int32_t) e->size - (int32_t) branch_off;
     *slot = arm64_jit_enc_b_imm(byte_delta >> 2);
+}
+
+static void arm64_jit_emit_exit_epilogue_branch(struct arm64_jit_emitter *e) {
+    uint32_t branch_off = (uint32_t) e->size;
+    arm64_jit_emit32(e, arm64_jit_enc_b_imm(0));
+    if (e->block->exit_epilogue_branch_count < ARM64_JIT_MAX_FIXUPS) {
+        e->block->exit_epilogue_branches[e->block->exit_epilogue_branch_count++] = branch_off;
+    } else {
+        e->overflowed = true;
+    }
+}
+
+static void arm64_jit_patch_exit_epilogue_branches(struct arm64_jit_emitter *e,
+        uint32_t epilogue_off) {
+    if (e->dry_run || e->buf == NULL)
+        return;
+    for (uint32_t i = 0; i < e->block->exit_epilogue_branch_count; i++) {
+        uint32_t branch_off = e->block->exit_epilogue_branches[i];
+        uint32_t *slot = (uint32_t *) (e->buf + branch_off);
+        int64_t byte_delta = (int64_t) epilogue_off - (int64_t) branch_off;
+        if ((byte_delta & 3) != 0 ||
+                byte_delta < -0x08000000ll || byte_delta > 0x07fffffcll) {
+            e->overflowed = true;
+            continue;
+        }
+        *slot = arm64_jit_enc_b_imm((int32_t) (byte_delta >> 2));
+    }
 }
 
 static bool arm64_jit_emit_inline_scalar_regoff_tlb(struct arm64_jit_emitter *e,
@@ -3290,6 +3320,7 @@ static void arm64_jit_reset_emit_metadata(struct arm64_jit_block *block) {
     block->pc_map_count = 0;
     block->verify_site_count = 0;
     block->fixup_count = 0;
+    block->exit_epilogue_branch_count = 0;
     block->body_code_size = 0;
     block->spill_code_offset = UINT32_MAX;
     block->reload_code_offset = UINT32_MAX;
@@ -3336,6 +3367,10 @@ static bool arm64_jit_emit_block_contents(struct arm64_jit_emitter *e) {
     if (island_open) {
         arm64_jit_emit_control_transfer_fast_return_imm(e, block->end_pc, 0);
     }
+
+    uint32_t exit_epilogue_off = (uint32_t) e->size;
+    arm64_jit_emit_epilogue(e);
+    arm64_jit_patch_exit_epilogue_branches(e, exit_epilogue_off);
 
     block->body_code_size = (uint32_t) e->size;
 
