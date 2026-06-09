@@ -71,6 +71,23 @@
 //   code_page_map_size = 144
 //   pc_target_cache = 152
 //   pc_target_cache_size = 160
+//   fast_func_meta = 168
+//   fast_func_meta_size = 176
+//   edge_profile = 184
+//   edge_profile_size = 192
+//   fast_recompile_source_pc = 200
+//   fast_recompile_target_pc = 208
+//   fast_recompile_kind = 216
+//   fast_trace_cache = 224
+//   fast_trace_cache_size = 232
+//   fast_call_profiler = 240
+//   fast_func_request_pc = 248
+// arm64_jit_edge_profile_entry (64 bytes):
+//   count = 0
+//   source_pc = 8
+//   target_pc = 16
+//   observed_target = 24
+//   kind = 32
 // arm64_jit_pc_target_cache_entry (64 bytes):
 //   pc = 0
 //   invalidate_gen = 8
@@ -104,6 +121,31 @@
 //   reload_state_fn = 56
 //   light_spill_state_fn = 64
 //   insert_serial = 72
+// arm64_jit_fast_trace_cache_entry (64 bytes):
+//   entry_pc = 0
+//   target_pc = 8
+//   invalidate_gen = 16
+//   kind = 20
+//   block = 24
+//   jit_entry_fn = 32
+//   spill_state_fn = 40
+//   reload_state_fn = 48
+//   light_spill_state_fn = 56
+// arm64_jit_fast_func_meta_entry (64 bytes):
+//   entry_pc = 0
+//   invalidate_gen = 8
+//   score = 12
+//   flags = 16
+//   fast_block = 24
+// arm64_jit_fast_call_profiler:
+//   depth = 0
+//   frames = 8
+// arm64_jit_fast_call_frame (32 bytes):
+//   entry_pc = 0
+//   return_pc = 8
+//   call_pc = 16
+//   gain = 24
+//   flags = 28
 // arm64_jit_block:
 //   start_pc = 0
 //   end_pc = 8
@@ -157,6 +199,324 @@
 .macro JIT_CONTROL_FAST_PROFILE_INC base_offset, kind_reg
 .endm
 #endif
+
+.macro JIT_FAST_FUNC_ASM_PROFILE_INC offset, scratch0x, scratch1x
+    adrp \scratch0x, _g_arm64_jit_fast_func_asm_profile@PAGE
+    add \scratch0x, \scratch0x, _g_arm64_jit_fast_func_asm_profile@PAGEOFF
+    ldr \scratch1x, [\scratch0x, #\offset]
+    add \scratch1x, \scratch1x, #1
+    str \scratch1x, [\scratch0x, #\offset]
+.endm
+
+.macro JIT_FAST_FUNC_ASM_TOP_RECORD entry_pc, scorew, flagsw, scratch0x, scratch1x
+    adrp \scratch0x, _g_arm64_jit_fast_func_asm_top@PAGE
+    add \scratch0x, \scratch0x, _g_arm64_jit_fast_func_asm_top@PAGEOFF
+    ldr \scratch1x, [\scratch0x]
+    cmp \scratch1x, \entry_pc
+    b.eq .Lfast_func_asm_top_store_\@
+    cbz \scratch1x, .Lfast_func_asm_top_store_entry_\@
+    add \scratch0x, \scratch0x, #16
+    ldr \scratch1x, [\scratch0x]
+    cmp \scratch1x, \entry_pc
+    b.eq .Lfast_func_asm_top_store_\@
+    cbz \scratch1x, .Lfast_func_asm_top_store_entry_\@
+    add \scratch0x, \scratch0x, #16
+    ldr \scratch1x, [\scratch0x]
+    cmp \scratch1x, \entry_pc
+    b.eq .Lfast_func_asm_top_store_\@
+    cbz \scratch1x, .Lfast_func_asm_top_store_entry_\@
+    add \scratch0x, \scratch0x, #16
+    ldr \scratch1x, [\scratch0x]
+    cmp \scratch1x, \entry_pc
+    b.eq .Lfast_func_asm_top_store_\@
+    cbz \scratch1x, .Lfast_func_asm_top_store_entry_\@
+    add \scratch0x, \scratch0x, #16
+    ldr \scratch1x, [\scratch0x]
+    cmp \scratch1x, \entry_pc
+    b.eq .Lfast_func_asm_top_store_\@
+    cbz \scratch1x, .Lfast_func_asm_top_store_entry_\@
+    add \scratch0x, \scratch0x, #16
+    ldr \scratch1x, [\scratch0x]
+    cmp \scratch1x, \entry_pc
+    b.eq .Lfast_func_asm_top_store_\@
+    cbz \scratch1x, .Lfast_func_asm_top_store_entry_\@
+    add \scratch0x, \scratch0x, #16
+    ldr \scratch1x, [\scratch0x]
+    cmp \scratch1x, \entry_pc
+    b.eq .Lfast_func_asm_top_store_\@
+    cbz \scratch1x, .Lfast_func_asm_top_store_entry_\@
+    add \scratch0x, \scratch0x, #16
+    ldr \scratch1x, [\scratch0x]
+    cmp \scratch1x, \entry_pc
+    b.eq .Lfast_func_asm_top_store_\@
+    cbz \scratch1x, .Lfast_func_asm_top_store_entry_\@
+    b .Lfast_func_asm_top_done_\@
+.Lfast_func_asm_top_store_entry_\@:
+    str \entry_pc, [\scratch0x]
+.Lfast_func_asm_top_store_\@:
+    str \scorew, [\scratch0x, #8]
+    str \flagsw, [\scratch0x, #12]
+.Lfast_func_asm_top_done_\@:
+.endm
+
+.macro JIT_EDGE_PROFILE_RECORD rt, source, target, kindx, kindw, observed, scratch0, count_out, scratch2, scratch3w
+    mov \count_out, #0
+    ldr \scratch0, [\rt, #184]       // rt->edge_profile
+    cbz \scratch0, 99f
+    ldr \count_out, [\rt, #192]      // rt->edge_profile_size
+    cbz \count_out, 99f
+    eor \scratch2, \source, \target, lsr #4
+    eor \scratch2, \scratch2, \kindx
+    lsr \scratch2, \scratch2, #2
+    sub \count_out, \count_out, #1
+    and \scratch2, \scratch2, \count_out
+    add \scratch0, \scratch0, \scratch2, lsl #6
+    ldr \count_out, [\scratch0, #8]
+    cmp \count_out, \source
+    b.ne 98f
+    ldr \count_out, [\scratch0, #16]
+    cmp \count_out, \target
+    b.ne 98f
+    ldr \scratch3w, [\scratch0, #32]
+    cmp \scratch3w, \kindw
+    b.ne 98f
+    str \observed, [\scratch0, #24]
+    ldr \count_out, [\scratch0]
+    add \count_out, \count_out, #1
+    str \count_out, [\scratch0]
+    b 99f
+98:
+    mov \count_out, #1
+    str \count_out, [\scratch0]
+    str \source, [\scratch0, #8]
+    str \target, [\scratch0, #16]
+    str \observed, [\scratch0, #24]
+    str \kindw, [\scratch0, #32]
+99:
+.endm
+
+.macro JIT_FAST_RECOMPILE_REQUEST_IF_HOT rt, source, target, kindw, count
+    cmp \count, #64
+    b.lo 99f
+    ldr \count, [\rt, #200]
+    cbnz \count, 99f
+    str \source, [\rt, #200]
+    str \target, [\rt, #208]
+    str \kindw, [\rt, #216]
+99:
+.endm
+
+.macro JIT_FAST_FUNC_RECORD_GAIN rt, entry_pc, gainw, metax, idx_scratchx, idx_scratchw, flag_scratchx, flag_scratchw, score_scratchx, score_scratchw
+    cbz \gainw, .Lfast_func_record_gain_done_\@
+    ldr \metax, [\rt, #168]          // rt->fast_func_meta
+    cbz \metax, .Lfast_func_record_gain_done_\@
+    ldr \idx_scratchx, [\rt, #176]   // rt->fast_func_meta_size
+    cbz \idx_scratchx, .Lfast_func_record_gain_done_\@
+    sub \idx_scratchx, \idx_scratchx, #1
+    and \idx_scratchx, \idx_scratchx, \entry_pc, lsr #2
+    add \metax, \metax, \idx_scratchx, lsl #6
+    ldr \idx_scratchx, [\metax]      // entry_pc
+    cmp \idx_scratchx, \entry_pc
+    b.eq .Lfast_func_record_gain_match_\@
+    str \entry_pc, [\metax]
+    ldr \idx_scratchw, [\rt, #120]   // rt->invalidate_gen
+    str \idx_scratchw, [\metax, #8]
+    str wzr, [\metax, #12]           // score
+    str wzr, [\metax, #16]           // flags
+    str xzr, [\metax, #24]           // fast_block
+    b .Lfast_func_record_gain_ready_\@
+.Lfast_func_record_gain_match_\@:
+    ldr \idx_scratchw, [\metax, #8]  // invalidate_gen
+    ldr \score_scratchw, [\rt, #120]
+    cmp \idx_scratchw, \score_scratchw
+    b.eq .Lfast_func_record_gain_ready_\@
+    str \entry_pc, [\metax]
+    str \score_scratchw, [\metax, #8]
+    str wzr, [\metax, #12]
+    str wzr, [\metax, #16]
+    str xzr, [\metax, #24]
+.Lfast_func_record_gain_ready_\@:
+    ldr \flag_scratchw, [\metax, #16] // flags
+    tbz \flag_scratchw, #0, .Lfast_func_record_gain_eligible_\@ // INELIGIBLE
+    b .Lfast_func_record_gain_done_\@
+.Lfast_func_record_gain_eligible_\@:
+    tbnz \flag_scratchw, #2, .Lfast_func_record_gain_done_\@ // HAS_FAST
+    ldr \score_scratchw, [\metax, #12] // score
+    adds \score_scratchw, \score_scratchw, \gainw
+    b.cc .Lfast_func_record_gain_store_\@
+    mov \score_scratchw, #-1
+.Lfast_func_record_gain_store_\@:
+    str \score_scratchw, [\metax, #12]
+    cmp \score_scratchw, #4096
+    b.lo .Lfast_func_record_gain_done_\@
+    tbnz \flag_scratchw, #1, .Lfast_func_record_gain_done_\@ // REQUESTED
+    orr \flag_scratchw, \flag_scratchw, #2
+    str \flag_scratchw, [\metax, #16]
+    JIT_FAST_FUNC_ASM_TOP_RECORD \entry_pc, \score_scratchw, \flag_scratchw, \idx_scratchx, \flag_scratchx
+    ldr \idx_scratchx, [\rt, #248]     // rt->fast_func_request_pc
+    cbnz \idx_scratchx, .Lfast_func_record_gain_done_\@
+    str \entry_pc, [\rt, #248]
+.Lfast_func_record_gain_done_\@:
+.endm
+
+.macro JIT_FAST_CALL_STACK_CLEAR rt, scratch0x
+    ldr \scratch0x, [\rt, #240]       // rt->fast_call_profiler
+    cbz \scratch0x, .Lfast_call_stack_clear_done_\@
+    tst \scratch0x, #7
+    b.ne .Lfast_call_stack_clear_done_\@
+    str wzr, [\scratch0x]             // depth = 0
+.Lfast_call_stack_clear_done_\@:
+.endm
+
+.macro JIT_FAST_CALL_STACK_ADD_GAIN rt, gain_imm, profilerx, depthw, framex
+    ldr \profilerx, [\rt, #240]       // rt->fast_call_profiler
+    cbz \profilerx, .Lfast_call_stack_add_gain_done_\@
+    tst \profilerx, #7
+    b.ne .Lfast_call_stack_add_gain_done_\@
+    ldr \depthw, [\profilerx]         // depth
+    cbz \depthw, .Lfast_call_stack_add_gain_done_\@
+    sub \depthw, \depthw, #1
+    uxtw \framex, \depthw
+    lsl \framex, \framex, #5
+    add \framex, \profilerx, \framex
+    add \framex, \framex, #8
+    ldr \depthw, [\framex, #24]
+    add \depthw, \depthw, #\gain_imm
+    str \depthw, [\framex, #24]
+    cmp \depthw, #4096
+    b.lo .Lfast_call_stack_add_gain_done_\@
+    ldr \profilerx, [\rt, #248]      // rt->fast_func_request_pc
+    cbnz \profilerx, .Lfast_call_stack_add_gain_done_\@
+    ldr \framex, [\framex]           // active frame entry_pc
+    str \framex, [\rt, #248]
+.Lfast_call_stack_add_gain_done_\@:
+.endm
+
+.macro JIT_FAST_CALL_STACK_PUSH rt, source, target, return_pc, profilerx, depthw, framex
+    ldr \profilerx, [\rt, #240]       // rt->fast_call_profiler
+    cbz \profilerx, .Lfast_call_stack_push_done_\@
+    tst \profilerx, #7
+    b.ne .Lfast_call_stack_push_done_\@
+    ldr \depthw, [\profilerx]         // depth
+    cmp \depthw, #8
+    b.lo .Lfast_call_stack_push_room_\@
+    str wzr, [\profilerx]
+    b .Lfast_call_stack_push_done_\@
+.Lfast_call_stack_push_room_\@:
+    uxtw \framex, \depthw
+    lsl \framex, \framex, #5
+    add \framex, \profilerx, \framex
+    add \framex, \framex, #8
+    add \depthw, \depthw, #1
+    str \depthw, [\profilerx]
+    str \target, [\framex]
+    str \return_pc, [\framex, #8]
+    str \source, [\framex, #16]
+    str wzr, [\framex, #24]          // gain counts helper/control edges, not raw call frequency
+    str wzr, [\framex, #28]
+    JIT_FAST_FUNC_ASM_PROFILE_INC 0, \framex, \profilerx
+.Lfast_call_stack_push_done_\@:
+.endm
+
+.macro JIT_FAST_CALL_STACK_RET rt, target, scratch0x, scratch0w, scratch1x, scratch1w, scratch2x, scratch2w, scratch3x, scratch3w
+    ldr \scratch0x, [\rt, #240]       // rt->fast_call_profiler
+    cbz \scratch0x, .Lfast_call_stack_ret_done_\@
+    tst \scratch0x, #7
+    b.ne .Lfast_call_stack_ret_done_\@
+    ldr \scratch1w, [\scratch0x]      // depth
+    cbz \scratch1w, .Lfast_call_stack_ret_done_\@
+    JIT_FAST_FUNC_ASM_PROFILE_INC 8, \scratch2x, \scratch3x
+    sub \scratch1w, \scratch1w, #1
+    str \scratch1w, [\scratch0x]      // pop speculatively; mismatch clears.
+    uxtw \scratch1x, \scratch1w
+    lsl \scratch1x, \scratch1x, #5
+    add \scratch1x, \scratch0x, \scratch1x
+    add \scratch1x, \scratch1x, #8
+    ldr \scratch2x, [\scratch1x, #8] // return_pc
+    cmp \scratch2x, \target
+    b.eq .Lfast_call_stack_ret_match_\@
+    str wzr, [\scratch0x]
+    JIT_FAST_FUNC_ASM_PROFILE_INC 24, \scratch2x, \scratch3x
+    b .Lfast_call_stack_ret_done_\@
+.Lfast_call_stack_ret_match_\@:
+    ldr \scratch2x, [\scratch1x]     // entry_pc
+    JIT_FAST_FUNC_ASM_PROFILE_INC 16, x4, x30
+    ldr \scratch1w, [\scratch1x, #24] // gain
+    ldr \scratch3w, [\scratch0x]      // popped depth
+    cbz \scratch3w, .Lfast_call_stack_ret_record_\@
+    sub \scratch3w, \scratch3w, #1
+    uxtw \scratch3x, \scratch3w
+    lsl \scratch3x, \scratch3x, #5
+    add \scratch3x, \scratch0x, \scratch3x
+    add \scratch3x, \scratch3x, #8
+    ldr \scratch0w, [\scratch3x, #24]
+    add \scratch0w, \scratch0w, \scratch1w
+    str \scratch0w, [\scratch3x, #24]
+.Lfast_call_stack_ret_record_\@:
+    cbz \scratch1w, .Lfast_call_stack_ret_done_\@
+    JIT_FAST_FUNC_ASM_PROFILE_INC 32, x4, x30
+    mov \scratch3w, \scratch1w
+    JIT_FAST_FUNC_RECORD_GAIN \rt, \scratch2x, \scratch3w, \scratch0x, \scratch1x, \scratch1w, x4, w4, x30, w30
+.Lfast_call_stack_ret_done_\@:
+.endm
+
+.macro JIT_FAST_TRACE_CACHE_LOOKUP rt, source, target, kindx, kindw, out_entry, scratch0x, scratch0w, scratch1x, scratch1w, miss_label
+    ldr \scratch0x, [\rt, #224]      // rt->fast_trace_cache
+    cbz \scratch0x, \miss_label
+    ldr \scratch1x, [\rt, #232]      // rt->fast_trace_cache_size
+    cbz \scratch1x, \miss_label
+    sub \scratch1x, \scratch1x, #1
+    lsr \out_entry, \source, #2
+    eor \out_entry, \out_entry, \source, lsr #9
+    and \out_entry, \out_entry, \scratch1x
+    add \out_entry, \scratch0x, \out_entry, lsl #6
+    ldr \scratch0x, [\out_entry]     // entry_pc
+    cmp \scratch0x, \source
+    b.ne \miss_label
+    ldr \scratch0x, [\out_entry, #8] // target_pc
+    cmp \scratch0x, \target
+    b.ne \miss_label
+    ldr \scratch0w, [\out_entry, #20] // kind
+    cmp \scratch0w, \kindw
+    b.ne \miss_label
+    ldr \scratch0w, [\out_entry, #16] // invalidate_gen
+    ldr \scratch1w, [\rt, #120]
+    cmp \scratch0w, \scratch1w
+    b.ne \miss_label
+    ldr \scratch0x, [\out_entry, #24] // block
+    cbz \scratch0x, \miss_label
+    ldr \scratch1x, [\out_entry, #32] // jit_entry_fn
+    cbz \scratch1x, \miss_label
+.endm
+
+.macro JIT_FAST_FUNCTION_TRACE_CACHE_LOOKUP rt, target, out_entry, scratch0x, scratch0w, scratch1x, scratch1w, miss_label
+    ldr \scratch0x, [\rt, #224]      // rt->fast_trace_cache
+    cbz \scratch0x, \miss_label
+    ldr \scratch1x, [\rt, #232]      // rt->fast_trace_cache_size
+    cbz \scratch1x, \miss_label
+    sub \scratch1x, \scratch1x, #1
+    lsr \out_entry, \target, #2
+    eor \out_entry, \out_entry, \target, lsr #9
+    and \out_entry, \out_entry, \scratch1x
+    add \out_entry, \scratch0x, \out_entry, lsl #6
+    ldr \scratch0x, [\out_entry]     // entry_pc
+    cmp \scratch0x, \target
+    b.ne \miss_label
+    ldr \scratch0x, [\out_entry, #8] // target_pc
+    cmp \scratch0x, \target
+    b.ne \miss_label
+    ldr \scratch0w, [\out_entry, #20] // kind
+    cmp \scratch0w, #2               // ARM64_JIT_FAST_TRACE_FUNCTION
+    b.ne \miss_label
+    ldr \scratch0w, [\out_entry, #16] // invalidate_gen
+    ldr \scratch1w, [\rt, #120]
+    cmp \scratch0w, \scratch1w
+    b.ne \miss_label
+    ldr \scratch0x, [\out_entry, #24] // block
+    cbz \scratch0x, \miss_label
+    ldr \scratch1x, [\out_entry, #32] // jit_entry_fn
+    cbz \scratch1x, \miss_label
+.endm
 
 .macro JIT_FRAGMENT_TLB_LOOKUP rt, target, out_entry, scratch0x, scratch0w, scratch1x, scratch1w, miss_label
     ldr \scratch0x, [\rt, #104]      // rt->fragment_tlb
@@ -4186,12 +4546,70 @@ _arm64_jit_helper_control_transfer_fast_jitabi:
     stp x29, x30, [sp, #-128]!
     stp x16, x17, [sp, #16]
     stp x0, x1, [sp, #32]         // rt, target_pc
-    stp x2, x3, [sp, #48]         // kind, spare
+    stp x2, x3, [sp, #48]         // kind, source_pc
     str x4, [sp, #64]
     mrs x4, nzcv
     str x4, [sp, #72]
+    and x4, x2, #3
+    JIT_EDGE_PROFILE_RECORD x0, x3, x1, x4, w4, x1, x16, x17, x30, w30
+    JIT_FAST_RECOMPILE_REQUEST_IF_HOT x0, x3, x1, w4, x17
+    ldr x2, [sp, #48]             // packed kind/control_flags
+    tbz x2, #8, Lcontrol_fast_call_profile_done
+    JIT_FAST_CALL_STACK_ADD_GAIN x0, 1, x16, w30, x17
+    ldr x3, [sp, #56]             // source_pc
+    ldr x1, [sp, #40]             // target_pc
+    add x4, x3, #4                // return_pc
+    JIT_FAST_CALL_STACK_PUSH x0, x3, x1, x4, x16, w30, x17
+Lcontrol_fast_call_profile_done:
+    ldr x2, [sp, #48]             // packed kind/control_flags
     and x2, x2, #3
     str x2, [sp, #80]
+    ldr x16, [x0, #248]           // rt->fast_func_request_pc
+    cbnz x16, 8f
+
+    ldr x17, [sp, #48]            // packed kind/control_flags
+    tbz x17, #8, Lcontrol_fast_function_trace_miss
+    JIT_FAST_FUNCTION_TRACE_CACHE_LOOKUP x0, x1, x4, x16, w16, x17, w17, Lcontrol_fast_function_trace_miss
+    b Lcontrol_fast_trace_hit
+Lcontrol_fast_function_trace_miss:
+    JIT_FAST_TRACE_CACHE_LOOKUP x0, x3, x1, x2, w2, x4, x16, w16, x17, w17, Lcontrol_fast_trace_miss
+Lcontrol_fast_trace_hit:
+    ldr x0, [sp, #32]             // rt*
+    ldr x16, [x4, #24]            // trace block
+    str x16, [sp, #48]
+    ldr x17, [x4, #32]            // trace jit_entry_fn
+    str x17, [sp, #88]
+    ldr x16, [x4, #40]            // trace spill_state_fn
+    str x16, [sp, #112]
+    ldr x16, [x4, #48]            // trace reload_state_fn
+    str x16, [sp, #120]
+    ldr x16, [x4, #56]            // trace light_spill_state_fn
+    str x16, [sp, #96]
+    ldr x4, [sp, #72]
+    msr nzcv, x4
+    ldr x4, [sp, #64]
+    ldr x17, [x0, #128]           // source light spill
+    cbz x17, Lcontrol_fast_trace_spilled
+    blr x17
+Lcontrol_fast_trace_spilled:
+    ldr x0, [sp, #32]
+    ldr x1, [sp, #112]
+    str x1, [x0, #24]
+    ldr x1, [sp, #120]
+    str x1, [x0, #32]
+    ldr x1, [sp, #48]
+    str x1, [x0, #16]
+    ldr x1, [sp, #40]
+    str x1, [x0, #40]             // guard miss resumes at trace target
+    ldr x16, [sp, #96]
+    str x16, [x0, #128]
+    str xzr, [x0, #240]              // fast traces are leaf tiering units
+    ldr x17, [sp, #88]
+    ldp x16, x17, [sp, #16]
+    ldr x17, [sp, #88]
+    ldp x29, x30, [sp], #128
+    br x17
+Lcontrol_fast_trace_miss:
 
     ldr x16, [x0, #16]            // rt->block
     cbz x16, 5f
@@ -4394,6 +4812,91 @@ _arm64_jit_helper_branch_reg_fast_jitabi:
     // target. Misses full-spill and fall back to the C helper.
     mrs x4, nzcv
     str x4, [sp, #72]
+    mov x4, #1                    // ARM64_JIT_EDGE_BRANCH_REG
+    JIT_EDGE_PROFILE_RECORD x0, x1, x3, x4, w4, x3, x16, x17, x30, w30
+    JIT_FAST_RECOMPILE_REQUEST_IF_HOT x0, x1, x3, w4, x17
+    ldr x2, [sp, #48]             // original insn
+    ubfx x4, x2, #21, #4          // BR=0, BLR=1, RET=2
+    cmp x4, #1
+    b.ne Lbranch_fast_call_not_blr
+    JIT_FAST_CALL_STACK_ADD_GAIN x0, 1, x16, w30, x17
+    ldr x1, [sp, #40]             // guest_pc
+    ldr x3, [sp, #56]             // target_pc
+    add x4, x1, #4                // return_pc
+    JIT_FAST_CALL_STACK_PUSH x0, x1, x3, x4, x16, w30, x17
+    b Lbranch_fast_call_profile_done
+Lbranch_fast_call_not_blr:
+    cmp x4, #2
+    b.ne Lbranch_fast_call_not_ret
+    ldr x3, [sp, #56]             // target_pc
+    JIT_FAST_CALL_STACK_RET x0, x3, x16, w16, x17, w17, x1, w1, x2, w2
+    b Lbranch_fast_call_profile_done
+Lbranch_fast_call_not_ret:
+    JIT_FAST_CALL_STACK_ADD_GAIN x0, 1, x16, w30, x17
+Lbranch_fast_call_profile_done:
+    ldp x0, x1, [sp, #32]
+    ldp x2, x3, [sp, #48]
+    ldr x16, [x0, #248]           // rt->fast_func_request_pc
+    cbnz x16, 2f
+    ubfx x4, x2, #21, #4          // BR=0, BLR=1, RET=2
+    cmp x4, #1
+    b.ne Lbranch_fast_function_trace_miss
+    JIT_FAST_FUNCTION_TRACE_CACHE_LOOKUP x0, x3, x16, x17, w17, x30, w30, Lbranch_fast_function_trace_miss
+    b Lbranch_fast_trace_hit
+Lbranch_fast_function_trace_miss:
+    mov x4, #1                    // ARM64_JIT_EDGE_BRANCH_REG
+    JIT_FAST_TRACE_CACHE_LOOKUP x0, x1, x3, x4, w4, x16, x17, w17, x30, w30, Lbranch_fast_trace_miss
+Lbranch_fast_trace_hit:
+    str xzr, [sp, #96]
+    ldr x30, [sp, #48]            // original insn
+    ubfx x30, x30, #21, #4
+    cmp x30, #1
+    b.ne Lbranch_fast_trace_lr_done
+    ldr x30, [sp, #40]            // original guest_pc
+    add x30, x30, #4
+    str x30, [sp, #96]
+Lbranch_fast_trace_lr_done:
+    ldr x0, [sp, #32]             // rt*
+    ldr x17, [x16, #24]           // trace block
+    str x17, [sp, #48]
+    ldr x17, [x16, #32]           // trace jit_entry_fn
+    str x17, [sp, #88]
+    ldr x17, [x16, #40]           // trace spill_state_fn
+    str x17, [sp, #112]
+    ldr x17, [x16, #48]           // trace reload_state_fn
+    str x17, [sp, #120]
+    ldr x17, [x16, #56]           // trace light_spill_state_fn
+    str x17, [sp, #80]
+    ldr x4, [sp, #72]
+    msr nzcv, x4
+    ldr x4, [sp, #64]
+    ldr x17, [x0, #128]           // source light spill
+    cbz x17, Lbranch_fast_trace_spilled
+    blr x17
+Lbranch_fast_trace_spilled:
+    ldr x0, [sp, #32]
+    ldr x16, [sp, #96]            // BLR return PC, or zero
+    cbz x16, Lbranch_fast_trace_lr_published
+    ldr x30, [x0]                 // rt->cpu
+    str x16, [x30, #256]          // cpu->regs[30]
+Lbranch_fast_trace_lr_published:
+    ldr x16, [sp, #48]            // trace block
+    str x16, [x0, #16]
+    ldr x17, [sp, #56]
+    str x17, [x0, #40]            // guard miss resumes at trace target
+    ldr x17, [sp, #112]
+    str x17, [x0, #24]
+    ldr x17, [sp, #120]
+    str x17, [x0, #32]
+    ldr x17, [sp, #80]
+    str x17, [x0, #128]
+    str xzr, [x0, #240]              // fast traces are leaf tiering units
+    ldr x17, [sp, #88]
+    ldp x16, x17, [sp, #16]
+    ldr x17, [sp, #88]
+    ldp x29, x30, [sp], #128
+    br x17
+Lbranch_fast_trace_miss:
     ubfx x4, x2, #21, #4        // branch-register opc
     cmp x4, #2                  // BR=0, BLR=1, RET=2
     b.hi 2f

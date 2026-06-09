@@ -471,6 +471,15 @@ static void arm64_jit_patch_cond_branch_to_here(struct arm64_jit_emitter *e, uin
 static void arm64_jit_emit_exit_epilogue_branch(struct arm64_jit_emitter *e);
 static void arm64_jit_patch_exit_epilogue_branches(struct arm64_jit_emitter *e,
         uint32_t epilogue_off);
+static void arm64_jit_emit_publish_resume_pc(struct arm64_jit_emitter *e, addr_t pc);
+static enum arm64_jit_emit_result arm64_jit_emit_one(struct arm64_jit_emitter *e,
+        const struct arm64_jit_insn_info *info, uint32_t insn, addr_t guest_pc);
+static void arm64_jit_reset_emit_metadata(struct arm64_jit_block *block);
+static size_t arm64_jit_code_cap_for_estimate(size_t estimate);
+struct arm64_jit_fast_trace_build;
+static bool arm64_jit_emit_fast_trace_guard_prelude(struct arm64_jit_emitter *e,
+        const struct arm64_jit_fast_trace_build *trace, uint32_t *miss_branches,
+        uint32_t *miss_branch_count, uint32_t miss_branch_cap);
 
 static void arm64_jit_emit_c_entry_snippet(struct arm64_jit_emitter *e) {
     arm64_jit_emit_prologue(e);
@@ -478,6 +487,47 @@ static void arm64_jit_emit_c_entry_snippet(struct arm64_jit_emitter *e) {
     arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm(ARM64_JIT_HOST_HELPER1, ARM64_JIT_HOST_CTX,
             (96 >> 3))); // rt->entry_target
     arm64_jit_emit32(e, arm64_jit_enc_br(ARM64_JIT_HOST_HELPER1));
+}
+
+static void arm64_jit_emit_fast_trace_jit_entry_snippet(struct arm64_jit_emitter *e,
+        const struct arm64_jit_fast_trace_build *trace, uint32_t exit_epilogue_off,
+        addr_t guard_miss_pc) {
+    uint32_t guard_miss_branches[32];
+    uint32_t guard_miss_branch_count = 0;
+    if (!arm64_jit_emit_fast_trace_guard_prelude(e, trace, guard_miss_branches,
+                &guard_miss_branch_count,
+                sizeof(guard_miss_branches) / sizeof(guard_miss_branches[0])))
+        return;
+    arm64_jit_emit_load_cached_gpr_state(e);
+    uint32_t body_off = e->block->insn_host_offsets[0];
+    uint32_t body_branch_off = (uint32_t) e->size;
+    int64_t body_delta = (int64_t) body_off - (int64_t) body_branch_off;
+    if ((body_delta & 3) != 0 ||
+            body_delta < -0x08000000ll || body_delta > 0x07fffffcll) {
+        e->overflowed = true;
+        arm64_jit_emit32(e, arm64_jit_enc_b_imm(0));
+    } else {
+        arm64_jit_emit32(e, arm64_jit_enc_b_imm((int32_t) (body_delta >> 2)));
+    }
+
+    for (uint32_t i = 0; i < guard_miss_branch_count; i++)
+        arm64_jit_patch_cond_branch_to_here(e, guard_miss_branches[i]);
+    arm64_jit_emit_publish_resume_pc(e, guard_miss_pc);
+    uint32_t exit_branch_off = (uint32_t) e->size;
+    int64_t exit_delta = (int64_t) exit_epilogue_off - (int64_t) exit_branch_off;
+    if ((exit_delta & 3) != 0 ||
+            exit_delta < -0x08000000ll || exit_delta > 0x07fffffcll) {
+        e->overflowed = true;
+        arm64_jit_emit32(e, arm64_jit_enc_b_imm(0));
+    } else {
+        arm64_jit_emit32(e, arm64_jit_enc_b_imm((int32_t) (exit_delta >> 2)));
+    }
+}
+
+static void arm64_jit_emit_fast_trace_jit_return(struct arm64_jit_emitter *e) {
+    arm64_jit_emit_spill_cached_state(e);
+    arm64_jit_emit_publish_resume_pc(e, e->block->start_pc + 4);
+    arm64_jit_emit_exit_epilogue_branch(e);
 }
 
 static void arm64_jit_emit_jit_entry_snippet(struct arm64_jit_emitter *e) {
@@ -519,8 +569,9 @@ void arm64_jit_emit_helper_return(struct arm64_jit_emitter *e, void *helper, add
 }
 
 static void arm64_jit_emit_control_transfer_fast_return(struct arm64_jit_emitter *e,
-        unsigned target_reg, unsigned kind) {
-    arm64_jit_emit_load_imm64(e, 2, kind & 3);
+        unsigned target_reg, unsigned kind, addr_t source_pc, unsigned control_flags) {
+    arm64_jit_emit_load_imm64(e, 2, (kind & 3) | (control_flags << 8));
+    arm64_jit_emit_load_imm64(e, 3, source_pc);
     if (target_reg != 1)
         arm64_jit_emit32(e, arm64_jit_enc_mov_reg(1, target_reg));
     arm64_jit_emit32(e, arm64_jit_enc_mov_reg(0, 21));
@@ -530,18 +581,25 @@ static void arm64_jit_emit_control_transfer_fast_return(struct arm64_jit_emitter
 }
 
 static void arm64_jit_emit_control_transfer_fast_return_imm(struct arm64_jit_emitter *e,
-        addr_t target_pc, unsigned kind) {
+        addr_t source_pc, addr_t target_pc, unsigned kind) {
     arm64_jit_emit_load_imm64(e, 1, target_pc);
-    arm64_jit_emit_control_transfer_fast_return(e, 1, kind);
+    arm64_jit_emit_control_transfer_fast_return(e, 1, kind, source_pc, 0);
+}
+
+static void arm64_jit_emit_control_transfer_fast_return_imm_flags(struct arm64_jit_emitter *e,
+        addr_t source_pc, addr_t target_pc, unsigned kind, unsigned control_flags) {
+    arm64_jit_emit_load_imm64(e, 1, target_pc);
+    arm64_jit_emit_control_transfer_fast_return(e, 1, kind, source_pc, control_flags);
 }
 
 static void arm64_jit_emit_conditional_transfer_fast_return(struct arm64_jit_emitter *e,
-        uint32_t branch_insn, addr_t fallthrough_pc, addr_t target_pc, unsigned kind) {
+        uint32_t branch_insn, addr_t source_pc, addr_t fallthrough_pc,
+        addr_t target_pc, unsigned kind) {
     arm64_jit_emit_load_imm64(e, ARM64_JIT_HOST_TMP1, target_pc);
     arm64_jit_emit_load_imm64(e, ARM64_JIT_HOST_TMP2, fallthrough_pc);
     arm64_jit_emit32(e, branch_insn);
     arm64_jit_emit32(e, arm64_jit_enc_mov_reg(ARM64_JIT_HOST_TMP1, ARM64_JIT_HOST_TMP2));
-    arm64_jit_emit_control_transfer_fast_return(e, ARM64_JIT_HOST_TMP1, kind);
+    arm64_jit_emit_control_transfer_fast_return(e, ARM64_JIT_HOST_TMP1, kind, source_pc, 0);
 }
 
 static void arm64_jit_emit_helper_return_regarg(struct arm64_jit_emitter *e, void *helper,
@@ -613,6 +671,20 @@ static void arm64_jit_emit_set_guest_lr(struct arm64_jit_emitter *e, addr_t retu
     arm64_jit_emit_load_imm64(e, ARM64_JIT_HOST_HELPER0, return_pc);
     arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_CPU,
             (CPU_OFFSET(regs[30]) >> 3)));
+}
+
+static void arm64_jit_emit_set_guest_gpr_const(struct arm64_jit_emitter *e,
+        uint32_t guest_reg, uint64_t value) {
+    if (guest_reg >= 31)
+        return;
+    int host_reg = arm64_jit_host_reg_for_guest(e->block, guest_reg);
+    if (host_reg >= 0) {
+        arm64_jit_emit_load_imm64(e, (unsigned) host_reg, value);
+        return;
+    }
+    arm64_jit_emit_load_imm64(e, ARM64_JIT_HOST_HELPER0, value);
+    arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(ARM64_JIT_HOST_HELPER0, ARM64_JIT_HOST_CPU,
+            (CPU_OFFSET(regs[guest_reg]) >> 3)));
 }
 
 static void arm64_jit_emit_helper_continue_check(struct arm64_jit_emitter *e) {
@@ -883,7 +955,16 @@ static void arm64_jit_patch_cond_branch_to_here(struct arm64_jit_emitter *e, uin
         return;
     uint32_t *slot = (uint32_t *) (e->buf + branch_off);
     int32_t byte_delta = (int32_t) e->size - (int32_t) branch_off;
-    *slot = (*slot & 0xff00001fu) | (((uint32_t) (byte_delta >> 2) & 0x7ffffu) << 5);
+    int32_t word_delta = byte_delta >> 2;
+    if ((*slot & 0x7e000000u) == 0x36000000u) {
+        bool b5 = ((*slot >> 31) & 1) != 0;
+        bool nonzero = ((*slot >> 24) & 1) != 0;
+        unsigned bit40 = (*slot >> 19) & 0x1f;
+        unsigned rt = *slot & 0x1f;
+        *slot = arm64_jit_enc_tbz_tbnz(b5, nonzero, bit40, rt, word_delta);
+    } else {
+        *slot = (*slot & 0xff00001fu) | (((uint32_t) word_delta & 0x7ffffu) << 5);
+    }
 }
 
 static void arm64_jit_patch_b_to_here(struct arm64_jit_emitter *e, uint32_t branch_off) {
@@ -904,6 +985,29 @@ static void arm64_jit_emit_exit_epilogue_branch(struct arm64_jit_emitter *e) {
     }
 }
 
+static void arm64_jit_emit_exit_epilogue_branch_for_block(struct arm64_jit_emitter *e,
+        struct arm64_jit_block *block) {
+    if (e->dry_run) {
+        arm64_jit_emit32(e, arm64_jit_enc_b_imm(0));
+        return;
+    }
+    struct arm64_jit_block *saved = e->block;
+    e->block = block;
+    arm64_jit_emit_exit_epilogue_branch(e);
+    e->block = saved;
+}
+
+static void arm64_jit_emit_publish_resume_pc(struct arm64_jit_emitter *e, addr_t pc) {
+    arm64_jit_emit_load_imm64(e, ARM64_JIT_HOST_HELPER0, pc);
+    arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(ARM64_JIT_HOST_HELPER0,
+            ARM64_JIT_HOST_CTX, offsetof(struct arm64_jit_runtime, resume_pc) >> 3));
+    arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(ARM64_JIT_HOST_HELPER0,
+            ARM64_JIT_HOST_CPU, CPU_OFFSET(pc) >> 3));
+    arm64_jit_emit_load_imm64(e, ARM64_JIT_HOST_HELPER0, (uint32_t) INT_NONE);
+    arm64_jit_emit32(e, arm64_jit_enc_str32_uimm(ARM64_JIT_HOST_HELPER0,
+            ARM64_JIT_HOST_CTX, offsetof(struct arm64_jit_runtime, exit_interrupt) >> 2));
+}
+
 static void arm64_jit_patch_exit_epilogue_branches(struct arm64_jit_emitter *e,
         uint32_t epilogue_off) {
     if (e->dry_run || e->buf == NULL)
@@ -919,6 +1023,1329 @@ static void arm64_jit_patch_exit_epilogue_branches(struct arm64_jit_emitter *e,
         }
         *slot = arm64_jit_enc_b_imm((int32_t) (byte_delta >> 2));
     }
+}
+
+static bool arm64_jit_read_guest_u32(struct arm64_jit_emitter *e, addr_t pc,
+        uint32_t *out) {
+    if (e->tlb == NULL || out == NULL)
+        return false;
+    return tlb_read(e->tlb, pc, out, sizeof(*out));
+}
+
+struct arm64_jit_fast_trace_build {
+    struct arm64_jit_block block;
+    addr_t pcs[128];
+    uint32_t insns[128];
+    struct arm64_jit_insn_info infos[128];
+    bool synthetic_set_lr[128];
+    addr_t synthetic_lr[128];
+    bool synthetic_branch_guard[128];
+    uint32_t synthetic_branch_insn[128];
+    addr_t synthetic_branch_fallback_pc[128];
+    uint32_t call_depth;
+    addr_t guard_addr[16];
+    uint64_t guard_value[16];
+    uint32_t guard_count;
+    addr_t const_reg[31];
+    bool const_valid[31];
+    addr_t mem_load_addr[31];
+    bool mem_load_addr_valid[31];
+    const char *reject_reason;
+    addr_t reject_pc;
+    uint32_t reject_insn;
+    uint32_t synthetic_branch_guard_count;
+    bool function_entry;
+    bool closed_loop;
+};
+
+static void arm64_jit_fast_trace_reject(struct arm64_jit_fast_trace_build *trace,
+        const char *reason, addr_t pc, uint32_t insn) {
+    if (trace->reject_reason != NULL)
+        return;
+    trace->reject_reason = reason;
+    trace->reject_pc = pc;
+    trace->reject_insn = insn;
+}
+
+static bool arm64_jit_fast_trace_contains_pc(const struct arm64_jit_fast_trace_build *trace,
+        addr_t pc) {
+    for (uint32_t i = 0; i < trace->block.insn_count; i++) {
+        if (trace->pcs[i] == pc)
+            return true;
+    }
+    return false;
+}
+
+static bool arm64_jit_fast_trace_pending_contains(const addr_t *pending,
+        uint32_t pending_count, addr_t pc) {
+    for (uint32_t i = 0; i < pending_count; i++) {
+        if (pending[i] == pc)
+            return true;
+    }
+    return false;
+}
+
+static bool arm64_jit_fast_trace_enqueue_pc(const struct arm64_jit_fast_trace_build *trace,
+        addr_t *pending, uint32_t *pending_count, uint32_t pending_cap, addr_t pc) {
+    if (arm64_jit_fast_trace_contains_pc(trace, pc) ||
+            arm64_jit_fast_trace_pending_contains(pending, *pending_count, pc))
+        return true;
+    if (*pending_count >= pending_cap)
+        return false;
+    pending[(*pending_count)++] = pc;
+    return true;
+}
+
+static bool arm64_jit_fast_trace_pop_pc(addr_t *pending, uint32_t *pending_count,
+        addr_t *pc_out) {
+    if (*pending_count == 0)
+        return false;
+    *pc_out = pending[--(*pending_count)];
+    return true;
+}
+
+static bool arm64_jit_fast_trace_append(struct arm64_jit_fast_trace_build *trace,
+        addr_t pc, uint32_t insn, const struct arm64_jit_insn_info *info) {
+    if (trace->block.insn_count >= sizeof(trace->pcs) / sizeof(trace->pcs[0]))
+        return false;
+    uint32_t idx = trace->block.insn_count++;
+    trace->pcs[idx] = pc;
+    trace->insns[idx] = insn;
+    trace->infos[idx] = *info;
+    return true;
+}
+
+static bool arm64_jit_fast_trace_append_set_lr(struct arm64_jit_fast_trace_build *trace,
+        addr_t pc, addr_t lr) {
+    if (trace->block.insn_count >= sizeof(trace->pcs) / sizeof(trace->pcs[0]))
+        return false;
+    uint32_t idx = trace->block.insn_count++;
+    trace->pcs[idx] = pc;
+    trace->insns[idx] = 0;
+    memset(&trace->infos[idx], 0, sizeof(trace->infos[idx]));
+    trace->infos[idx].gpr_use_count = 1;
+    trace->infos[idx].gpr_uses[0].reg = 30;
+    trace->infos[idx].gpr_uses[0].flags = ARM64_JIT_USE_WRITE;
+    trace->synthetic_set_lr[idx] = true;
+    trace->synthetic_lr[idx] = lr;
+    return true;
+}
+
+static bool arm64_jit_fast_trace_append_branch_guard(struct arm64_jit_fast_trace_build *trace,
+        addr_t pc, uint32_t insn, const struct arm64_jit_insn_info *info,
+        addr_t fallback_pc) {
+    if (trace->block.insn_count >= sizeof(trace->pcs) / sizeof(trace->pcs[0]))
+        return false;
+    uint32_t idx = trace->block.insn_count++;
+    trace->pcs[idx] = pc;
+    trace->insns[idx] = insn;
+    trace->infos[idx] = *info;
+    trace->infos[idx].type = INSN_BRANCH;
+    trace->synthetic_branch_guard[idx] = true;
+    trace->synthetic_branch_insn[idx] = insn;
+    trace->synthetic_branch_fallback_pc[idx] = fallback_pc;
+    trace->synthetic_branch_guard_count++;
+    return true;
+}
+
+static bool arm64_jit_fast_trace_read_guest_u64(struct arm64_jit_emitter *e, addr_t pc,
+        uint64_t *out) {
+    if (e->tlb == NULL || out == NULL)
+        return false;
+    return tlb_read(e->tlb, pc, out, sizeof(*out));
+}
+
+static bool arm64_jit_fast_trace_note_guard(struct arm64_jit_fast_trace_build *trace,
+        addr_t addr, uint64_t expected) {
+    if ((addr & 0xfffu) > 0xff8u)
+        return false;
+    if (trace->guard_count >= sizeof(trace->guard_addr) / sizeof(trace->guard_addr[0]))
+        return false;
+    uint32_t idx = trace->guard_count++;
+    trace->guard_addr[idx] = addr;
+    trace->guard_value[idx] = expected;
+    return true;
+}
+
+static bool arm64_jit_fast_trace_decode_adrp(uint32_t insn, addr_t pc, addr_t *out) {
+    if ((insn & 0x9f000000u) != 0x90000000u)
+        return false;
+    uint64_t immlo = (insn >> 29) & 0x3u;
+    uint64_t immhi = (insn >> 5) & 0x7ffffu;
+    int64_t imm = arm64_sign_extend((immhi << 2) | immlo, 21) << 12;
+    *out = (addr_t) (((uint64_t) pc & ~0xfffull) + imm);
+    return true;
+}
+
+static void arm64_jit_fast_trace_track_dataflow(struct arm64_jit_emitter *e,
+        struct arm64_jit_fast_trace_build *trace, const struct arm64_jit_insn_info *info,
+        addr_t pc, uint32_t insn) {
+    (void) e;
+    if ((insn & 0x9f000000u) == 0x90000000u) { // ADRP
+        uint32_t rd = ARM64_RD(insn);
+        addr_t value = 0;
+        if (rd < 31 && arm64_jit_fast_trace_decode_adrp(insn, pc, &value)) {
+            trace->const_reg[rd] = value;
+            trace->const_valid[rd] = true;
+            trace->mem_load_addr_valid[rd] = false;
+        }
+        return;
+    }
+    if ((insn & 0xffc00000u) == 0x91000000u) { // ADD immediate, no shift
+        uint32_t rd = ARM64_RD(insn);
+        uint32_t rn = ARM64_RN(insn);
+        uint32_t sh = (insn >> 22) & 0x3u;
+        uint64_t imm = (insn >> 10) & 0xfffu;
+        if (sh == 1)
+            imm <<= 12;
+        else if (sh != 0)
+            imm = UINT64_MAX;
+        if (rd < 31 && rn < 31 && imm != UINT64_MAX && trace->const_valid[rn]) {
+            trace->const_reg[rd] = trace->const_reg[rn] + imm;
+            trace->const_valid[rd] = true;
+            trace->mem_load_addr_valid[rd] = false;
+        } else if (rd < 31) {
+            trace->const_valid[rd] = false;
+            trace->mem_load_addr_valid[rd] = false;
+        }
+        return;
+    }
+    if ((insn & 0xffc00000u) == 0xf9400000u) { // LDR Xrt, [Xrn,#imm]
+        uint32_t rt = ARM64_RT(insn);
+        uint32_t rn = ARM64_RN(insn);
+        if (rt < 31 && rn < 31 && trace->const_valid[rn]) {
+            trace->mem_load_addr[rt] = trace->const_reg[rn] + (((insn >> 10) & 0xfffu) << 3);
+            trace->mem_load_addr_valid[rt] = true;
+            trace->const_valid[rt] = false;
+        } else if (rt < 31) {
+            trace->const_valid[rt] = false;
+            trace->mem_load_addr_valid[rt] = false;
+        }
+        return;
+    }
+    for (uint32_t i = 0; i < info->gpr_use_count; i++) {
+        const struct arm64_jit_guest_reg_use *use = &info->gpr_uses[i];
+        if ((use->flags & ARM64_JIT_USE_WRITE) && use->reg < 31)
+            trace->const_valid[use->reg] = false;
+        if ((use->flags & ARM64_JIT_USE_WRITE) && use->reg < 31)
+            trace->mem_load_addr_valid[use->reg] = false;
+    }
+}
+
+static bool arm64_jit_fast_trace_resolve_indirect(struct arm64_jit_emitter *e,
+        struct arm64_jit_fast_trace_build *trace, uint32_t rn, addr_t *target_out) {
+    if (rn >= 31 || !trace->mem_load_addr_valid[rn])
+        return false;
+    uint64_t target = 0;
+    addr_t guard_addr = trace->mem_load_addr[rn];
+    if (!arm64_jit_fast_trace_read_guest_u64(e, guard_addr, &target) || target == 0)
+        return false;
+    if (!arm64_jit_fast_trace_note_guard(trace, guard_addr, target))
+        return false;
+    *target_out = (addr_t) target;
+    return true;
+}
+
+static bool arm64_jit_fast_trace_observed_edge(addr_t source_pc, addr_t *target_out) {
+    if (!arm64_jit_fast_mode() || target_out == NULL)
+        return false;
+    uint64_t best_count = 0;
+    addr_t best_target = 0;
+    for (size_t i = 0; i < ARM64_JIT_EDGE_PROFILE_SIZE; i++) {
+        struct arm64_jit_edge_profile_entry *entry = &g_arm64_jit_edge_profile[i];
+        if ((addr_t) atomic_load_explicit(&entry->source_pc, memory_order_relaxed) !=
+                source_pc)
+            continue;
+        uint64_t count = atomic_load_explicit(&entry->count, memory_order_relaxed);
+        if (count <= best_count)
+            continue;
+        best_count = count;
+        best_target = (addr_t) atomic_load_explicit(&entry->target_pc,
+                memory_order_relaxed);
+    }
+    if (best_count == 0)
+        return false;
+    *target_out = best_target;
+    return true;
+}
+
+static bool arm64_jit_fast_trace_build_from(struct arm64_jit_emitter *e,
+        struct arm64_jit_fast_trace_build *trace, addr_t pc, addr_t return_pc,
+        uint32_t depth, bool *returned_out) {
+    if (returned_out != NULL)
+        *returned_out = false;
+    if (depth > 8) {
+        arm64_jit_fast_trace_reject(trace, "max-depth", pc, 0);
+        return false;
+    }
+    if (arm64_jit_fast_trace_contains_pc(trace, pc)) {
+        if (trace->function_entry && depth == 0 && trace->block.insn_count != 0) {
+            trace->closed_loop = true;
+            return true;
+        }
+        arm64_jit_fast_trace_reject(trace, "recursive-entry", pc, 0);
+        return false;
+    }
+    addr_t pending[128];
+    uint32_t pending_count = 0;
+    for (;;) {
+        if (trace->block.insn_count >= sizeof(trace->pcs) / sizeof(trace->pcs[0])) {
+            arm64_jit_fast_trace_reject(trace, "max-insns", pc, 0);
+            return false;
+        }
+        if (arm64_jit_fast_trace_contains_pc(trace, pc)) {
+            if (trace->function_entry && depth == 0 && trace->block.insn_count != 0) {
+                trace->closed_loop = true;
+                return true;
+            }
+            arm64_jit_fast_trace_reject(trace, "recursive-frontier", pc, 0);
+            return false;
+        }
+
+        uint32_t insn = 0;
+        struct arm64_jit_insn_info info;
+        if (!arm64_jit_read_guest_u32(e, pc, &insn) ||
+                !arm64_jit_analyze_insn(insn, &info)) {
+            arm64_jit_fast_trace_reject(trace, "decode", pc, insn);
+            return false;
+        }
+
+        uint32_t op = (insn >> 26) & 0x3f;
+        if (info.type == INSN_BRANCH && (op == 0x05 || op == 0x25)) {
+            bool is_link = op == 0x25;
+            addr_t target = pc + arm64_branch_imm26(insn);
+            if (is_link) {
+                if (depth >= 8) {
+                    arm64_jit_fast_trace_reject(trace, "call-depth", pc, insn);
+                    return false;
+                }
+                uint32_t saved_insn_count = trace->block.insn_count;
+                uint32_t saved_guard_count = trace->guard_count;
+                uint32_t saved_branch_guard_count = trace->synthetic_branch_guard_count;
+                const char *saved_reject_reason = trace->reject_reason;
+                addr_t saved_reject_pc = trace->reject_pc;
+                uint32_t saved_reject_insn = trace->reject_insn;
+                uint64_t saved_const_reg[32];
+                bool saved_const_valid[32];
+                addr_t saved_mem_load_addr[32];
+                bool saved_mem_load_addr_valid[32];
+                memcpy(saved_const_reg, trace->const_reg, sizeof(saved_const_reg));
+                memcpy(saved_const_valid, trace->const_valid, sizeof(saved_const_valid));
+                memcpy(saved_mem_load_addr, trace->mem_load_addr, sizeof(saved_mem_load_addr));
+                memcpy(saved_mem_load_addr_valid, trace->mem_load_addr_valid,
+                        sizeof(saved_mem_load_addr_valid));
+                if (!arm64_jit_fast_trace_append_set_lr(trace, pc, pc + 4)) {
+                    arm64_jit_fast_trace_reject(trace, "append-lr", pc, insn);
+                    return false;
+                }
+                bool callee_returned = false;
+                bool callee_ok = arm64_jit_fast_trace_build_from(e, trace, target, pc + 4,
+                        depth + 1, &callee_returned);
+                if ((!callee_ok || !callee_returned) && trace->function_entry) {
+                    trace->block.insn_count = saved_insn_count;
+                    trace->guard_count = saved_guard_count;
+                    trace->synthetic_branch_guard_count = saved_branch_guard_count;
+                    trace->reject_reason = saved_reject_reason;
+                    trace->reject_pc = saved_reject_pc;
+                    trace->reject_insn = saved_reject_insn;
+                    memcpy(trace->const_reg, saved_const_reg, sizeof(saved_const_reg));
+                    memcpy(trace->const_valid, saved_const_valid, sizeof(saved_const_valid));
+                    memcpy(trace->mem_load_addr, saved_mem_load_addr,
+                            sizeof(saved_mem_load_addr));
+                    memcpy(trace->mem_load_addr_valid, saved_mem_load_addr_valid,
+                            sizeof(saved_mem_load_addr_valid));
+                    if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                        arm64_jit_fast_trace_reject(trace, "append-call", pc, insn);
+                        return false;
+                    }
+                    pc += 4;
+                    continue;
+                }
+                if (!callee_ok)
+                    return false;
+                if (!callee_returned) {
+                    arm64_jit_fast_trace_reject(trace, "callee-no-ret", pc, insn);
+                    return false;
+                }
+                pc += 4;
+                continue;
+            }
+            if (target <= pc) {
+                if (trace->function_entry && arm64_jit_fast_trace_contains_pc(trace, target)) {
+                    if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                        arm64_jit_fast_trace_reject(trace, "append-loop-b", pc, insn);
+                        return false;
+                    }
+                    if (!arm64_jit_fast_trace_pop_pc(pending, &pending_count, &pc)) {
+                        if (returned_out != NULL)
+                            *returned_out = true;
+                        return true;
+                    }
+                    continue;
+                } else if (trace->function_entry && depth == 0 &&
+                        target >= trace->block.start_pc) {
+                    pc = target;
+                    continue;
+                } else {
+                    arm64_jit_fast_trace_reject(trace, "backward-b", pc, insn);
+                    return false;
+                }
+            }
+            if (trace->function_entry) {
+                if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                    arm64_jit_fast_trace_reject(trace, "append-b", pc, insn);
+                    return false;
+                }
+                if (!arm64_jit_fast_trace_enqueue_pc(trace, pending, &pending_count,
+                            sizeof(pending) / sizeof(pending[0]), target)) {
+                    arm64_jit_fast_trace_reject(trace, "pending-b", pc, insn);
+                    return false;
+                }
+                if (!arm64_jit_fast_trace_pop_pc(pending, &pending_count, &pc)) {
+                    if (returned_out != NULL)
+                        *returned_out = true;
+                    return true;
+                }
+                continue;
+            }
+            pc = target;
+            continue;
+        }
+
+        if (info.type == INSN_BRANCH && (insn & 0xff000010u) == 0x54000000u) {
+            addr_t branch_target = pc + arm64_branch_imm19(insn);
+            addr_t fallthrough_pc = pc + 4;
+            if (trace->function_entry) {
+                if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                    arm64_jit_fast_trace_reject(trace, "append-function-bcond", pc, insn);
+                    return false;
+                }
+                if (!arm64_jit_fast_trace_enqueue_pc(trace, pending, &pending_count,
+                            sizeof(pending) / sizeof(pending[0]), branch_target)) {
+                    arm64_jit_fast_trace_reject(trace, "pending-bcond", pc, insn);
+                    return false;
+                }
+                pc = fallthrough_pc;
+                continue;
+            }
+            if (branch_target <= pc && trace->function_entry && depth == 0 &&
+                    branch_target >= trace->block.start_pc &&
+                    arm64_jit_fast_trace_contains_pc(trace, branch_target)) {
+                if (arm64_jit_fast_trace_contains_pc(trace, branch_target)) {
+                    if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                        arm64_jit_fast_trace_reject(trace, "append-loop-bcond", pc, insn);
+                        return false;
+                    }
+                    pc = fallthrough_pc;
+                    continue;
+                }
+            }
+            addr_t observed = 0;
+            addr_t follow = fallthrough_pc;
+            if (arm64_jit_fast_trace_observed_edge(pc, &observed) &&
+                    (observed == branch_target || observed == fallthrough_pc))
+                follow = observed;
+            addr_t fallback = follow == branch_target ? fallthrough_pc : branch_target;
+            uint32_t fallback_insn = 0;
+            if (return_pc != 0 && arm64_jit_read_guest_u32(e, fallback, &fallback_insn) &&
+                    fallback_insn == arm64_jit_enc_ret(30))
+                fallback = return_pc;
+            if (!arm64_jit_fast_trace_append_branch_guard(trace, pc, insn, &info, fallback)) {
+                arm64_jit_fast_trace_reject(trace, "append-bcond-guard", pc, insn);
+                return false;
+            }
+            pc = follow;
+            continue;
+        }
+
+        if (info.type == INSN_BRANCH && (insn & 0x7e000000u) == 0x34000000u) {
+            addr_t branch_target = pc + arm64_branch_imm19(insn);
+            addr_t fallthrough_pc = pc + 4;
+            if (trace->function_entry) {
+                if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                    arm64_jit_fast_trace_reject(trace, "append-function-cbz", pc, insn);
+                    return false;
+                }
+                if (!arm64_jit_fast_trace_enqueue_pc(trace, pending, &pending_count,
+                            sizeof(pending) / sizeof(pending[0]), branch_target)) {
+                    arm64_jit_fast_trace_reject(trace, "pending-cbz", pc, insn);
+                    return false;
+                }
+                pc = fallthrough_pc;
+                continue;
+            }
+            if (branch_target <= pc && trace->function_entry && depth == 0 &&
+                    branch_target >= trace->block.start_pc &&
+                    arm64_jit_fast_trace_contains_pc(trace, branch_target)) {
+                if (arm64_jit_fast_trace_contains_pc(trace, branch_target)) {
+                    if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                        arm64_jit_fast_trace_reject(trace, "append-loop-cbz", pc, insn);
+                        return false;
+                    }
+                    pc = fallthrough_pc;
+                    continue;
+                }
+            }
+            addr_t observed = 0;
+            addr_t follow = fallthrough_pc;
+            if (arm64_jit_fast_trace_observed_edge(pc, &observed) &&
+                    (observed == branch_target || observed == fallthrough_pc))
+                follow = observed;
+            addr_t fallback = follow == branch_target ? fallthrough_pc : branch_target;
+            uint32_t fallback_insn = 0;
+            if (return_pc != 0 && arm64_jit_read_guest_u32(e, fallback, &fallback_insn) &&
+                    fallback_insn == arm64_jit_enc_ret(30))
+                fallback = return_pc;
+            if (!arm64_jit_fast_trace_append_branch_guard(trace, pc, insn, &info, fallback)) {
+                arm64_jit_fast_trace_reject(trace, "append-cbz-guard", pc, insn);
+                return false;
+            }
+            pc = follow;
+            continue;
+        }
+
+        if (info.type == INSN_BRANCH && (insn & 0x7e000000u) == 0x36000000u) {
+            addr_t branch_target = pc + arm64_branch_imm14(insn);
+            addr_t fallthrough_pc = pc + 4;
+            if (trace->function_entry) {
+                if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                    arm64_jit_fast_trace_reject(trace, "append-function-tbz", pc, insn);
+                    return false;
+                }
+                if (!arm64_jit_fast_trace_enqueue_pc(trace, pending, &pending_count,
+                            sizeof(pending) / sizeof(pending[0]), branch_target)) {
+                    arm64_jit_fast_trace_reject(trace, "pending-tbz", pc, insn);
+                    return false;
+                }
+                pc = fallthrough_pc;
+                continue;
+            }
+            if (branch_target <= pc && trace->function_entry && depth == 0 &&
+                    branch_target >= trace->block.start_pc &&
+                    arm64_jit_fast_trace_contains_pc(trace, branch_target)) {
+                if (arm64_jit_fast_trace_contains_pc(trace, branch_target)) {
+                    if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                        arm64_jit_fast_trace_reject(trace, "append-loop-tbz", pc, insn);
+                        return false;
+                    }
+                    pc = fallthrough_pc;
+                    continue;
+                }
+            }
+            addr_t observed = 0;
+            addr_t follow = fallthrough_pc;
+            if (arm64_jit_fast_trace_observed_edge(pc, &observed) &&
+                    (observed == branch_target || observed == fallthrough_pc))
+                follow = observed;
+            addr_t fallback = follow == branch_target ? fallthrough_pc : branch_target;
+            uint32_t fallback_insn = 0;
+            if (return_pc != 0 && arm64_jit_read_guest_u32(e, fallback, &fallback_insn) &&
+                    fallback_insn == arm64_jit_enc_ret(30))
+                fallback = return_pc;
+            if (!arm64_jit_fast_trace_append_branch_guard(trace, pc, insn, &info, fallback)) {
+                arm64_jit_fast_trace_reject(trace, "append-tbz-guard", pc, insn);
+                return false;
+            }
+            pc = follow;
+            continue;
+        }
+
+        if (info.type == INSN_BRANCH) {
+            if ((insn & 0xfe000000u) == 0xd6000000u) {
+                if (insn == arm64_jit_enc_ret(30)) {
+                    if (trace->function_entry && depth == 0) {
+                        if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+                            arm64_jit_fast_trace_reject(trace, "append-ret", pc, insn);
+                            return false;
+                        }
+                        if (arm64_jit_fast_trace_pop_pc(pending, &pending_count, &pc))
+                            continue;
+                    }
+                    if (returned_out != NULL)
+                        *returned_out = true;
+                    return true;
+                }
+                addr_t target = 0;
+                if (!arm64_jit_fast_trace_resolve_indirect(e, trace, ARM64_RN(insn), &target)) {
+                    arm64_jit_fast_trace_reject(trace, "unresolved-indirect", pc, insn);
+                    return false;
+                }
+                if ((insn & ~0x3e0u) == arm64_jit_enc_blr(0) &&
+                        !arm64_jit_fast_trace_append_set_lr(trace, pc, pc + 4)) {
+                    arm64_jit_fast_trace_reject(trace, "append-blr-lr", pc, insn);
+                    return false;
+                }
+                pc = target;
+                continue;
+            }
+            arm64_jit_fast_trace_reject(trace, "unsupported-branch", pc, insn);
+            return false;
+        }
+
+        if (!arm64_jit_fast_trace_append(trace, pc, insn, &info)) {
+            arm64_jit_fast_trace_reject(trace, "append", pc, insn);
+            return false;
+        }
+        arm64_jit_fast_trace_track_dataflow(e, trace, &info, pc, insn);
+        if (info.terminates_fragment) {
+            arm64_jit_fast_trace_reject(trace, "terminates-fragment", pc, insn);
+            return false;
+        }
+        pc += 4;
+    }
+}
+
+static bool arm64_jit_emit_fast_expanded_bl(struct arm64_jit_emitter *e,
+        addr_t guest_pc, addr_t target_pc) {
+    if (!arm64_jit_fast_mode() || arm64_jit_verify_mode() || e->tlb == NULL)
+        return false;
+    // Runtime tiering and edge observation are active, but executing embedded
+    // expanded traces is kept disabled until fallback/resume publication is
+    // converted to the standalone fast-trace cache ABI.
+    return false;
+    if (!arm64_jit_fast_edge_hot(guest_pc, target_pc))
+        return false;
+
+    struct arm64_jit_fast_trace_build trace;
+    memset(&trace, 0, sizeof(trace));
+    trace.block.start_pc = target_pc;
+    trace.block.insn_pcs = trace.pcs;
+    trace.block.insns = trace.insns;
+    trace.block.infos = trace.infos;
+    trace.block.insn_count = 0;
+    trace.block.insn_cap = sizeof(trace.pcs) / sizeof(trace.pcs[0]);
+    trace.block.disable_local_fixups = false;
+
+    bool returned = false;
+    if (!arm64_jit_fast_trace_build_from(e, &trace, target_pc, guest_pc + 4,
+                0, &returned) ||
+            !returned ||
+            trace.block.insn_count == 0) {
+        if (!e->dry_run && arm64_jit_trace_mode()) {
+            fprintf(stderr,
+                    "[arm64-jit-fast] reject-build pc=0x%llx target=0x%llx insns=%u reason=%s reject_pc=0x%llx reject_insn=0x%08x\n",
+                    (unsigned long long) guest_pc,
+                    (unsigned long long) target_pc,
+                    trace.block.insn_count,
+                    trace.reject_reason ? trace.reject_reason : "unknown",
+                    (unsigned long long) trace.reject_pc,
+                    trace.reject_insn);
+        }
+        return false;
+    }
+    trace.block.end_pc = trace.pcs[trace.block.insn_count - 1] + 4;
+    arm64_jit_build_fragment_gpr_map(&trace.block);
+
+    struct arm64_jit_block *source_block = e->block;
+    struct arm64_jit_emitter dry = *e;
+    dry.block = &trace.block;
+    dry.buf = NULL;
+    dry.cap = SIZE_MAX;
+    dry.size = 0;
+    dry.overflowed = false;
+    dry.dry_run = true;
+    arm64_jit_emit_load_cached_state(&dry);
+    for (uint32_t i = 0; i < trace.block.insn_count; i++) {
+        if (trace.synthetic_set_lr[i]) {
+            arm64_jit_emit_set_guest_lr(&dry, trace.synthetic_lr[i]);
+            continue;
+        }
+        if (trace.synthetic_branch_guard[i]) {
+            uint32_t skip = (uint32_t) dry.size;
+            arm64_jit_emit32(&dry, arm64_jit_enc_b_cond(
+                    (enum arm64_cond) (trace.synthetic_branch_insn[i] & 0xf), 0));
+            arm64_jit_emit_spill_cached_state(&dry);
+            arm64_jit_emit_load_imm64(&dry, 16, trace.synthetic_branch_fallback_pc[i]);
+            arm64_jit_emit32(&dry, arm64_jit_enc_str64_uimm(16, ARM64_JIT_HOST_CPU,
+                    CPU_OFFSET(pc) >> 3));
+            arm64_jit_emit_exit_epilogue_branch_for_block(&dry, source_block);
+            arm64_jit_patch_cond_branch_to_here(&dry, skip);
+            continue;
+        }
+        enum arm64_jit_emit_result res = arm64_jit_emit_one(&dry, &trace.infos[i],
+                trace.insns[i], trace.pcs[i]);
+        if (res != ARM64_JIT_EMIT_CONTINUE || dry.overflowed) {
+            if (!e->dry_run && arm64_jit_trace_mode()) {
+                fprintf(stderr,
+                        "[arm64-jit-fast] reject-preflight pc=0x%llx target=0x%llx trace_pc=0x%llx insn=0x%08x res=%d overflow=%d\n",
+                        (unsigned long long) guest_pc,
+                        (unsigned long long) target_pc,
+                        (unsigned long long) trace.pcs[i],
+                        trace.insns[i],
+                        res,
+                        dry.overflowed);
+            }
+            e->block = source_block;
+            return false;
+        }
+    }
+    arm64_jit_emit_spill_cached_state(&dry);
+    if (dry.overflowed) {
+        if (!e->dry_run && arm64_jit_trace_mode()) {
+            fprintf(stderr,
+                    "[arm64-jit-fast] reject-preflight-spill pc=0x%llx target=0x%llx\n",
+                    (unsigned long long) guest_pc,
+                    (unsigned long long) target_pc);
+        }
+        e->block = source_block;
+        return false;
+    }
+
+    uint32_t trace_code_offset = (uint32_t) e->size;
+    arm64_jit_emit_set_guest_lr(e, guest_pc + 4);
+    arm64_jit_emit_spill_cached_state(e);
+
+    uint32_t guard_miss_branches[32];
+    uint32_t guard_miss_branch_count = 0;
+    for (uint32_t i = 0; i < trace.guard_count; i++) {
+        uint64_t expected = trace.guard_value[i];
+        if (arm64_jit_fast_force_guard_fail_mode())
+            expected ^= 1u;
+        uint64_t tlb_index = TLB_INDEX(trace.guard_addr[i]);
+        uint64_t tlb_entry_off = offsetof(struct tlb, entries) +
+                tlb_index * sizeof(struct tlb_entry);
+        uint64_t page = TLB_PAGE(trace.guard_addr[i]);
+        uint64_t page_off = trace.guard_addr[i] & 0xfffu;
+        arm64_jit_emit_load_imm64(e, 15, tlb_entry_off);
+        arm64_jit_emit32(e, arm64_jit_enc_add_shift_reg64(15, ARM64_JIT_HOST_TLB, 15, 0));
+        arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm(16, 15, 0));
+        arm64_jit_emit_load_imm64(e, 17, page);
+        arm64_jit_emit32(e, arm64_jit_enc_eor_reg64(16, 16, 17));
+        guard_miss_branches[guard_miss_branch_count++] = (uint32_t) e->size;
+        arm64_jit_emit32(e, arm64_jit_enc_cbz_cbnz(true, true, 16, 0));
+        arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm(16, 15, 2));
+        arm64_jit_emit32(e, arm64_jit_enc_add_shift_reg64(16, 16, 17, 0));
+        if (page_off != 0) {
+            arm64_jit_emit_load_imm64(e, 14, page_off);
+            arm64_jit_emit32(e, arm64_jit_enc_add_shift_reg64(16, 16, 14, 0));
+        }
+        arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm(16, 16, 0));
+        arm64_jit_emit_load_imm64(e, 17, expected);
+        arm64_jit_emit32(e, arm64_jit_enc_cmp_reg64(16, 17));
+        guard_miss_branches[guard_miss_branch_count++] = (uint32_t) e->size;
+        arm64_jit_emit32(e, arm64_jit_enc_b_cond(COND_NE, 0));
+    }
+
+    e->block = &trace.block;
+    arm64_jit_emit_load_cached_state(e);
+    for (uint32_t i = 0; i < trace.block.insn_count; i++) {
+        addr_t pc = trace.pcs[i];
+        uint32_t insn = trace.insns[i];
+        const struct arm64_jit_insn_info *info = &trace.infos[i];
+        if (trace.synthetic_set_lr[i]) {
+            arm64_jit_emit_set_guest_lr(e, trace.synthetic_lr[i]);
+            continue;
+        }
+        if (trace.synthetic_branch_guard[i]) {
+            uint32_t skip = (uint32_t) e->size;
+            arm64_jit_emit32(e, arm64_jit_enc_b_cond(
+                    (enum arm64_cond) (trace.synthetic_branch_insn[i] & 0xf), 0));
+            arm64_jit_emit_spill_cached_state(e);
+            arm64_jit_emit_load_imm64(e, 16, trace.synthetic_branch_fallback_pc[i]);
+            arm64_jit_emit32(e, arm64_jit_enc_str64_uimm(16, ARM64_JIT_HOST_CPU,
+                    CPU_OFFSET(pc) >> 3));
+            arm64_jit_emit_exit_epilogue_branch_for_block(e, source_block);
+            arm64_jit_patch_cond_branch_to_here(e, skip);
+            continue;
+        }
+        enum arm64_jit_emit_result res = arm64_jit_emit_one(e, info, insn, pc);
+        if (res != ARM64_JIT_EMIT_CONTINUE) {
+            e->block = source_block;
+            return false;
+        }
+    }
+    arm64_jit_emit_spill_cached_state(e);
+    e->block = source_block;
+    arm64_jit_emit_load_cached_state(e);
+    uint32_t success_branch = (uint32_t) e->size;
+    arm64_jit_emit32(e, arm64_jit_enc_b_imm(0));
+
+    for (uint32_t i = 0; i < guard_miss_branch_count; i++)
+        arm64_jit_patch_cond_branch_to_here(e, guard_miss_branches[i]);
+    arm64_jit_emit_set_guest_lr(e, guest_pc + 4);
+    arm64_jit_emit_control_transfer_fast_return_imm(e, guest_pc, target_pc, 0);
+    arm64_jit_patch_b_to_here(e, success_branch);
+
+    if (source_block->fast_trace_count < ARM64_JIT_MAX_FAST_TRACES) {
+        struct arm64_jit_fast_trace *meta =
+                &source_block->fast_traces[source_block->fast_trace_count++];
+        meta->kind = ARM64_JIT_FAST_TRACE_EXPANDED;
+        meta->code_offset = trace_code_offset;
+        meta->inlined_insns = trace.block.insn_count;
+        meta->entry_pc = guest_pc;
+        meta->exit_pc = guest_pc + 4;
+        meta->thunk_pc = target_pc;
+        meta->guard_addr = trace.guard_count ? trace.guard_addr[0] : 0;
+        meta->guard_value = trace.guard_count ? trace.guard_value[0] : 0;
+        meta->invalidate_gen = e->state->invalidate_gen;
+    }
+    if (!e->dry_run)
+        arm64_jit_profile_fast_trace_emit(ARM64_JIT_FAST_TRACE_EXPANDED);
+    if (!e->dry_run && arm64_jit_trace_mode()) {
+        fprintf(stderr,
+                "[arm64-jit-fast] expanded pc=0x%llx target=0x%llx insns=%u guards=%u\n",
+                (unsigned long long) guest_pc,
+                (unsigned long long) target_pc,
+                trace.block.insn_count,
+                trace.guard_count);
+    }
+    return true;
+}
+
+static bool arm64_jit_fast_trace_validate_internal_targets(
+        struct arm64_jit_fast_trace_build *trace) {
+    if (!trace->function_entry || trace->block.insn_count == 0)
+        return true;
+    addr_t end_pc = trace->block.start_pc + 4;
+    for (uint32_t i = 0; i < trace->block.insn_count; i++) {
+        if (trace->pcs[i] + 4 > end_pc)
+            end_pc = trace->pcs[i] + 4;
+    }
+    for (uint32_t i = 0; i < trace->block.insn_count; i++) {
+        if (trace->synthetic_set_lr[i] || trace->synthetic_branch_guard[i])
+            continue;
+        uint32_t insn = trace->insns[i];
+        addr_t pc = trace->pcs[i];
+        addr_t target = 0;
+        bool fixed_branch = false;
+        uint32_t op = (insn >> 26) & 0x3f;
+        if (op == 0x05) {
+            target = pc + arm64_branch_imm26(insn);
+            fixed_branch = true;
+        } else if ((insn & 0xff000010u) == 0x54000000u) {
+            target = pc + arm64_branch_imm19(insn);
+            fixed_branch = true;
+        } else if ((insn & 0x7e000000u) == 0x34000000u) {
+            target = pc + arm64_branch_imm19(insn);
+            fixed_branch = true;
+        } else if ((insn & 0x7e000000u) == 0x36000000u) {
+            target = pc + arm64_branch_imm14(insn);
+            fixed_branch = true;
+        }
+        if (!fixed_branch || target < trace->block.start_pc || target >= end_pc)
+            continue;
+        if (!arm64_jit_fast_trace_contains_pc(trace, target)) {
+            arm64_jit_fast_trace_reject(trace, "missing-internal-target", pc, insn);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool arm64_jit_fast_trace_has_local_backedge(
+        const struct arm64_jit_fast_trace_build *trace) {
+    if (!trace->function_entry)
+        return false;
+    for (uint32_t i = 0; i < trace->block.insn_count; i++) {
+        if (trace->synthetic_set_lr[i] || trace->synthetic_branch_guard[i])
+            continue;
+        uint32_t insn = trace->insns[i];
+        addr_t pc = trace->pcs[i];
+        addr_t target = 0;
+        bool fixed_branch = false;
+        uint32_t op = (insn >> 26) & 0x3f;
+        if (op == 0x05) {
+            target = pc + arm64_branch_imm26(insn);
+            fixed_branch = true;
+        } else if ((insn & 0xff000010u) == 0x54000000u) {
+            target = pc + arm64_branch_imm19(insn);
+            fixed_branch = true;
+        } else if ((insn & 0x7e000000u) == 0x34000000u) {
+            target = pc + arm64_branch_imm19(insn);
+            fixed_branch = true;
+        } else if ((insn & 0x7e000000u) == 0x36000000u) {
+            target = pc + arm64_branch_imm14(insn);
+            fixed_branch = true;
+        }
+        if (fixed_branch && target < pc && arm64_jit_fast_trace_contains_pc(trace, target))
+            return true;
+    }
+    return false;
+}
+
+static bool arm64_jit_fast_trace_prepare_block(struct arm64_jit_fast_trace_build *trace,
+        struct arm64_jit_block *block, addr_t source_pc, addr_t target_pc,
+        uint32_t source_insn) {
+    memset(block, 0, sizeof(*block));
+    uint32_t count = trace->block.insn_count + (trace->function_entry ? 0 : 1);
+    block->insn_pcs = calloc(count, sizeof(*block->insn_pcs));
+    block->insns = calloc(count, sizeof(*block->insns));
+    block->infos = calloc(count, sizeof(*block->infos));
+    block->insn_host_offsets = malloc(count * sizeof(*block->insn_host_offsets));
+    block->entry_code = calloc(count, sizeof(*block->entry_code));
+    if (block->insn_pcs == NULL || block->insns == NULL || block->infos == NULL ||
+            block->insn_host_offsets == NULL || block->entry_code == NULL)
+        return false;
+    for (uint32_t i = 0; i < count; i++)
+        block->insn_host_offsets[i] = UINT32_MAX;
+    list_init(&block->hash_chain);
+    list_init(&block->page[0]);
+    list_init(&block->page[1]);
+    list_init(&block->jetsam);
+    list_init(&block->entrypoints);
+    block->insn_cap = count;
+    block->insn_count = count;
+    block->start_pc = source_pc;
+    block->end_pc = source_pc + 4;
+    block->terminal_interrupt = INT_NONE;
+    block->disable_local_fixups = !trace->function_entry;
+    block->is_fast_trace = true;
+    (void) source_insn;
+    block->fast_trace_jit_handoff_safe =
+            trace->function_entry ||
+            (trace->synthetic_branch_guard_count == 0 && trace->guard_count == 0);
+
+    uint32_t dst = 0;
+    if (!trace->function_entry) {
+        block->insn_pcs[0] = source_pc;
+        block->insns[0] = source_insn;
+        memset(&block->infos[0], 0, sizeof(block->infos[0]));
+        block->infos[0].gpr_use_count = 1;
+        block->infos[0].gpr_uses[0].reg = 30;
+        block->infos[0].gpr_uses[0].flags = ARM64_JIT_USE_WRITE;
+        dst = 1;
+    }
+
+    for (uint32_t i = 0; i < trace->block.insn_count; i++) {
+        block->insn_pcs[dst + i] = trace->pcs[i];
+        block->insns[dst + i] = trace->insns[i];
+        block->infos[dst + i] = trace->infos[i];
+        if (trace->pcs[i] + 4 > block->end_pc)
+            block->end_pc = trace->pcs[i] + 4;
+    }
+    (void) target_pc;
+    arm64_jit_build_fragment_gpr_map(block);
+    return true;
+}
+
+static bool arm64_jit_emit_fast_trace_guard_prelude(struct arm64_jit_emitter *e,
+        const struct arm64_jit_fast_trace_build *trace, uint32_t *miss_branches,
+        uint32_t *miss_branch_count, uint32_t miss_branch_cap) {
+    *miss_branch_count = 0;
+    for (uint32_t i = 0; i < trace->guard_count; i++) {
+        if (*miss_branch_count + 2 > miss_branch_cap)
+            return false;
+        uint64_t expected = trace->guard_value[i];
+        if (arm64_jit_fast_force_guard_fail_mode())
+            expected ^= 1u;
+        uint64_t tlb_index = TLB_INDEX(trace->guard_addr[i]);
+        uint64_t tlb_entry_off = offsetof(struct tlb, entries) +
+                tlb_index * sizeof(struct tlb_entry);
+        uint64_t page = TLB_PAGE(trace->guard_addr[i]);
+        uint64_t page_off = trace->guard_addr[i] & 0xfffu;
+        arm64_jit_emit_load_imm64(e, 15, tlb_entry_off);
+        arm64_jit_emit32(e, arm64_jit_enc_add_shift_reg64(15, ARM64_JIT_HOST_TLB, 15, 0));
+        arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm(16, 15, 0));
+        arm64_jit_emit_load_imm64(e, 17, page);
+        arm64_jit_emit32(e, arm64_jit_enc_eor_reg64(16, 16, 17));
+        miss_branches[(*miss_branch_count)++] = (uint32_t) e->size;
+        arm64_jit_emit32(e, arm64_jit_enc_cbz_cbnz(true, true, 16, 0));
+        arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm(16, 15, 2));
+        arm64_jit_emit32(e, arm64_jit_enc_add_shift_reg64(16, 16, 17, 0));
+        if (page_off != 0) {
+            arm64_jit_emit_load_imm64(e, 14, page_off);
+            arm64_jit_emit32(e, arm64_jit_enc_add_shift_reg64(16, 16, 14, 0));
+        }
+        arm64_jit_emit32(e, arm64_jit_enc_ldr64_uimm(16, 16, 0));
+        arm64_jit_emit_load_imm64(e, 17, expected);
+        arm64_jit_emit32(e, arm64_jit_enc_cmp_reg64(16, 17));
+        miss_branches[(*miss_branch_count)++] = (uint32_t) e->size;
+        arm64_jit_emit32(e, arm64_jit_enc_b_cond(COND_NE, 0));
+    }
+    return true;
+}
+
+static enum arm64_cond arm64_jit_inverse_cond(enum arm64_cond cond) {
+    return (enum arm64_cond) ((uint32_t) cond ^ 1u);
+}
+
+static bool arm64_jit_emit_fast_trace_body(struct arm64_jit_emitter *e,
+        const struct arm64_jit_fast_trace_build *trace, addr_t source_pc) {
+    if (!trace->function_entry)
+        arm64_jit_emit_set_guest_lr(e, source_pc + 4);
+    for (uint32_t i = 0; i < trace->block.insn_count; i++) {
+        addr_t pc = trace->pcs[i];
+        uint32_t insn = trace->insns[i];
+        const struct arm64_jit_insn_info *info = &trace->infos[i];
+        uint32_t block_index = trace->function_entry ? i : i + 1;
+        if (block_index < e->block->insn_count) {
+            e->block->insn_host_offsets[block_index] = (uint32_t) e->size;
+            arm64_jit_record_pc_map(e, pc);
+        }
+        if (trace->synthetic_set_lr[i]) {
+            arm64_jit_emit_set_guest_lr(e, trace->synthetic_lr[i]);
+            continue;
+        }
+        if (trace->synthetic_branch_guard[i]) {
+            addr_t branch_target = pc + arm64_branch_imm19(insn);
+            addr_t fallthrough_pc = pc + 4;
+            addr_t fallback_pc = trace->synthetic_branch_fallback_pc[i];
+            uint32_t guard_insn = insn;
+            if ((insn & 0xff000010u) == 0x54000000u) {
+                enum arm64_cond cond = (enum arm64_cond) (insn & 0xf);
+                enum arm64_cond success_cond =
+                        fallback_pc == fallthrough_pc ? cond : arm64_jit_inverse_cond(cond);
+                guard_insn = arm64_jit_enc_b_cond(success_cond, 0);
+            } else if ((insn & 0x7e000000u) == 0x34000000u) {
+                branch_target = pc + arm64_branch_imm19(insn);
+                uint32_t rt = ARM64_RT(insn);
+                int host_rt = arm64_jit_guest_src_host_reg(e->block, rt, false);
+                if (host_rt < 0)
+                    return false;
+                bool sf = ((insn >> 31) & 1) != 0;
+                bool nonzero = ((insn >> 24) & 1) != 0;
+                bool success_nonzero = fallback_pc == fallthrough_pc ? nonzero : !nonzero;
+                guard_insn = arm64_jit_enc_cbz_cbnz(sf, success_nonzero,
+                        (unsigned) host_rt, 0);
+            } else if ((insn & 0x7e000000u) == 0x36000000u) {
+                branch_target = pc + arm64_branch_imm14(insn);
+                uint32_t rt = ARM64_RT(insn);
+                int host_rt = arm64_jit_guest_src_host_reg(e->block, rt, false);
+                if (host_rt < 0)
+                    return false;
+                bool b5 = ((insn >> 31) & 1) != 0;
+                bool nonzero = ((insn >> 24) & 1) != 0;
+                unsigned bit40 = (insn >> 19) & 0x1f;
+                bool success_nonzero = fallback_pc == fallthrough_pc ? nonzero : !nonzero;
+                guard_insn = arm64_jit_enc_tbz_tbnz(b5, success_nonzero, bit40,
+                        (unsigned) host_rt, 0);
+            } else {
+                return false;
+            }
+            uint32_t success_branch = (uint32_t) e->size;
+            arm64_jit_emit32(e, guard_insn);
+            arm64_jit_emit_spill_cached_state(e);
+            arm64_jit_emit_publish_resume_pc(e, fallback_pc);
+            arm64_jit_emit_exit_epilogue_branch(e);
+            arm64_jit_patch_cond_branch_to_here(e, success_branch);
+            (void) branch_target;
+            continue;
+        }
+        enum arm64_jit_emit_result res = arm64_jit_emit_one(e, info, insn, pc);
+        if (trace->function_entry && res == ARM64_JIT_EMIT_TERMINATE)
+            continue;
+        if (res != ARM64_JIT_EMIT_CONTINUE) {
+            if (arm64_jit_trace_mode()) {
+                fprintf(stderr,
+                        "[arm64-jit-fast] emit-body-fail pc=0x%llx insn=0x%08x res=%d index=%u count=%u function=%u\n",
+                        (unsigned long long) pc, insn, res, i,
+                        trace->block.insn_count,
+                        trace->function_entry ? 1u : 0u);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool arm64_jit_emit_fast_trace_contents(struct arm64_jit_emitter *e,
+        const struct arm64_jit_fast_trace_build *trace, addr_t source_pc) {
+    struct arm64_jit_block *block = e->block;
+    arm64_jit_emit_prologue(e);
+    uint32_t guard_miss_branches[32];
+    uint32_t guard_miss_branch_count = 0;
+    if (!arm64_jit_emit_fast_trace_guard_prelude(e, trace, guard_miss_branches,
+                &guard_miss_branch_count,
+                sizeof(guard_miss_branches) / sizeof(guard_miss_branches[0])))
+        return false;
+
+    arm64_jit_emit_load_cached_state(e);
+    if (!trace->function_entry) {
+        block->insn_host_offsets[0] = (uint32_t) e->size;
+        arm64_jit_record_pc_map(e, source_pc);
+    }
+    if (!arm64_jit_emit_fast_trace_body(e, trace, source_pc))
+        return false;
+    if (!trace->function_entry) {
+        arm64_jit_emit_fast_trace_jit_return(e);
+    }
+
+    for (uint32_t i = 0; i < guard_miss_branch_count; i++)
+        arm64_jit_patch_cond_branch_to_here(e, guard_miss_branches[i]);
+    arm64_jit_emit_publish_resume_pc(e, source_pc);
+    arm64_jit_emit_exit_epilogue_branch(e);
+
+    uint32_t exit_epilogue_off = (uint32_t) e->size;
+    arm64_jit_emit_epilogue(e);
+    arm64_jit_patch_exit_epilogue_branches(e, exit_epilogue_off);
+
+    block->body_code_size = (uint32_t) e->size;
+    block->spill_code_offset = (uint32_t) e->size;
+    block->spill_state_fn = e->dry_run ? NULL : e->buf + e->size;
+    arm64_jit_emit_spill_cached_state(e);
+    arm64_jit_emit_state_snippet_ret(e);
+
+    block->light_spill_code_offset = (uint32_t) e->size;
+    block->light_spill_state_fn = e->dry_run ? NULL : e->buf + e->size;
+    arm64_jit_emit_light_spill_cached_state(e);
+    arm64_jit_emit_state_snippet_ret(e);
+
+    block->reload_code_offset = (uint32_t) e->size;
+    block->reload_state_fn = e->dry_run ? NULL : e->buf + e->size;
+    arm64_jit_emit_load_cached_state(e);
+    arm64_jit_emit_state_snippet_ret(e);
+
+    block->entry_thunks_offset = UINT32_MAX;
+    block->c_entry_fn = e->dry_run ? NULL : e->buf;
+    block->entry_code[0] = e->dry_run ? NULL : e->buf;
+    block->jit_entry_fn = e->dry_run ? NULL : e->buf + e->size;
+    arm64_jit_emit_fast_trace_jit_entry_snippet(e, trace, exit_epilogue_off,
+            trace->block.start_pc);
+    return true;
+}
+
+static size_t arm64_jit_estimate_fast_trace_code_size(struct arm64_jit_state *state,
+        struct arm64_jit_block *block, const struct arm64_jit_fast_trace_build *trace,
+        struct tlb *tlb, addr_t source_pc) {
+    arm64_jit_reset_emit_metadata(block);
+    struct arm64_jit_emitter dry = {
+        .state = state,
+        .block = block,
+        .tlb = tlb,
+        .buf = NULL,
+        .cap = SIZE_MAX,
+        .size = 0,
+        .overflowed = false,
+        .dry_run = true,
+    };
+    if (!arm64_jit_emit_fast_trace_contents(&dry, trace, source_pc) ||
+            dry.overflowed || dry.size > UINT32_MAX) {
+        arm64_jit_reset_emit_metadata(block);
+        return 0;
+    }
+    arm64_jit_reset_emit_metadata(block);
+    return arm64_jit_code_cap_for_estimate(dry.size);
+}
+
+static bool arm64_jit_emit_fast_trace_block(struct arm64_jit_state *state,
+        struct arm64_jit_block *block, const struct arm64_jit_fast_trace_build *trace,
+        struct tlb *tlb, addr_t source_pc) {
+    size_t cap = arm64_jit_estimate_fast_trace_code_size(state, block, trace, tlb, source_pc);
+    if (cap == 0 || cap > UINT32_MAX)
+        return false;
+    arm64_jit_begin_code_batch(state, cap);
+    uint8_t *buf = NULL;
+    if (!arm64_jit_alloc_code(state, block, cap, &buf)) {
+        arm64_jit_abort_code_batch(state);
+        return false;
+    }
+    arm64_jit_reset_emit_metadata(block);
+    struct arm64_jit_emitter e = {
+        .state = state,
+        .block = block,
+        .tlb = tlb,
+        .buf = buf,
+        .cap = cap,
+        .size = 0,
+        .overflowed = false,
+        .dry_run = false,
+    };
+    if (!arm64_jit_emit_fast_trace_contents(&e, trace, source_pc) || e.overflowed ||
+            !arm64_jit_patch_local_fixups(block, e.buf)) {
+        arm64_jit_abort_code_batch(state);
+        arm64_jit_free_code(block);
+        arm64_jit_reset_emit_metadata(block);
+        return false;
+    }
+    block->code_size = (uint32_t) e.size;
+    if (!arm64_jit_finish_code_batch(state)) {
+        arm64_jit_free_code(block);
+        return false;
+    }
+    arm64_jit_profile_fast_trace_emit(ARM64_JIT_FAST_TRACE_EXPANDED);
+    return true;
+}
+
+struct arm64_jit_block *arm64_jit_compile_fast_trace(struct arm64_jit_state *state,
+        addr_t source_pc, addr_t target_pc, uint32_t kind, struct tlb *tlb) {
+    if (state == NULL || tlb == NULL || !arm64_jit_fast_mode() ||
+            arm64_jit_verify_mode())
+        return NULL;
+    if (arm64_jit_fast_skip_pc(source_pc))
+        return NULL;
+    uint32_t source_insn = 0;
+    if (!arm64_jit_read_guest_u32(&(struct arm64_jit_emitter) { .tlb = tlb },
+                source_pc, &source_insn))
+        return NULL;
+    uint32_t op = (source_insn >> 26) & 0x3f;
+    bool is_fixed_bl = kind == ARM64_JIT_EDGE_DISPATCH && op == 0x25 &&
+            source_pc + arm64_branch_imm26(source_insn) == target_pc;
+    bool is_observed_blr = kind == ARM64_JIT_EDGE_BRANCH_REG &&
+            (source_insn & ~0x3e0u) == arm64_jit_enc_blr(0) && target_pc != 0;
+    if (!is_fixed_bl && !is_observed_blr)
+        return NULL;
+
+    struct arm64_jit_fast_trace_build trace;
+    memset(&trace, 0, sizeof(trace));
+    trace.block.start_pc = target_pc;
+    trace.block.insn_pcs = trace.pcs;
+    trace.block.insns = trace.insns;
+    trace.block.infos = trace.infos;
+    trace.block.insn_count = 0;
+    trace.block.insn_cap = sizeof(trace.pcs) / sizeof(trace.pcs[0]);
+    trace.block.disable_local_fixups = false;
+
+    struct arm64_jit_emitter builder = {
+        .state = state,
+        .tlb = tlb,
+        .dry_run = true,
+    };
+    bool returned = false;
+    if (!arm64_jit_fast_trace_build_from(&builder, &trace, target_pc,
+                source_pc + 4, 0, &returned) ||
+            !returned ||
+            trace.block.insn_count == 0) {
+        if (arm64_jit_trace_mode() && trace.reject_reason != NULL) {
+            fprintf(stderr,
+                    "[arm64-jit-fast] reject source=0x%llx target=0x%llx kind=%u reason=%s pc=0x%llx insn=0x%08x count=%u\n",
+                    (unsigned long long) source_pc,
+                    (unsigned long long) target_pc,
+                    kind,
+                    trace.reject_reason,
+                    (unsigned long long) trace.reject_pc,
+                    trace.reject_insn,
+                    trace.block.insn_count);
+        }
+        return NULL;
+    }
+
+    struct arm64_jit_block *block = calloc(1, sizeof(*block));
+    if (block == NULL)
+        return NULL;
+    if (!arm64_jit_fast_trace_prepare_block(&trace, block, source_pc, target_pc, source_insn) ||
+            !arm64_jit_emit_fast_trace_block(state, block, &trace, tlb, source_pc)) {
+        arm64_jit_free_code(block);
+        free(block->insn_pcs);
+        free(block->insns);
+        free(block->infos);
+        free(block->insn_host_offsets);
+        free(block->entry_code);
+        free(block);
+        return NULL;
+    }
+    if (arm64_jit_trace_mode()) {
+        fprintf(stderr,
+                "[arm64-jit-fast] standalone source=0x%llx target=0x%llx insns=%u guards=%u branch_guards=%u jit_handoff=%u code=%u\n",
+                (unsigned long long) source_pc,
+                (unsigned long long) target_pc,
+                trace.block.insn_count,
+                trace.guard_count,
+                trace.synthetic_branch_guard_count,
+                block->fast_trace_jit_handoff_safe ? 1u : 0u,
+                block->code_size);
+    }
+    return block;
+}
+
+struct arm64_jit_block *arm64_jit_compile_fast_function(struct arm64_jit_state *state,
+        addr_t entry_pc, struct tlb *tlb) {
+    if (state == NULL || tlb == NULL || !arm64_jit_fast_mode() ||
+            arm64_jit_verify_mode() || entry_pc == 0)
+        return NULL;
+    if (arm64_jit_fast_skip_pc(entry_pc))
+        return NULL;
+
+    struct arm64_jit_fast_trace_build trace;
+    memset(&trace, 0, sizeof(trace));
+    trace.block.start_pc = entry_pc;
+    trace.block.insn_pcs = trace.pcs;
+    trace.block.insns = trace.insns;
+    trace.block.infos = trace.infos;
+    trace.block.insn_count = 0;
+    trace.block.insn_cap = sizeof(trace.pcs) / sizeof(trace.pcs[0]);
+    trace.block.disable_local_fixups = false;
+    trace.function_entry = true;
+
+    struct arm64_jit_emitter builder = {
+        .state = state,
+        .tlb = tlb,
+        .dry_run = true,
+    };
+    bool returned = false;
+    if (!arm64_jit_fast_trace_build_from(&builder, &trace, entry_pc, 0, 0, &returned) ||
+            (!returned && !trace.closed_loop) || trace.block.insn_count == 0) {
+        if (arm64_jit_trace_mode() && trace.reject_reason != NULL) {
+            fprintf(stderr,
+                    "[arm64-jit-fast] reject-function entry=0x%llx reason=%s pc=0x%llx insn=0x%08x count=%u\n",
+                    (unsigned long long) entry_pc,
+                    trace.reject_reason,
+                    (unsigned long long) trace.reject_pc,
+                    trace.reject_insn,
+                    trace.block.insn_count);
+        }
+        return NULL;
+    }
+    if (!arm64_jit_fast_trace_validate_internal_targets(&trace)) {
+        if (arm64_jit_trace_mode()) {
+            fprintf(stderr,
+                    "[arm64-jit-fast] reject-function entry=0x%llx reason=%s pc=0x%llx insn=0x%08x count=%u\n",
+                    (unsigned long long) entry_pc,
+                    trace.reject_reason ? trace.reject_reason : "target-validation",
+                    (unsigned long long) trace.reject_pc,
+                    trace.reject_insn,
+                    trace.block.insn_count);
+        }
+        return NULL;
+    }
+    if (trace.guard_count != 1 || !arm64_jit_fast_trace_has_local_backedge(&trace)) {
+        arm64_jit_fast_trace_reject(&trace, "not-branch-heavy-function", entry_pc, 0);
+        if (arm64_jit_trace_mode()) {
+            fprintf(stderr,
+                    "[arm64-jit-fast] reject-function entry=0x%llx reason=%s pc=0x%llx insn=0x%08x count=%u guards=%u\n",
+                    (unsigned long long) entry_pc,
+                    trace.reject_reason,
+                    (unsigned long long) trace.reject_pc,
+                    trace.reject_insn,
+                    trace.block.insn_count,
+                    trace.guard_count);
+        }
+        return NULL;
+    }
+
+    struct arm64_jit_block *block = calloc(1, sizeof(*block));
+    if (block == NULL)
+        return NULL;
+    bool prepared = arm64_jit_fast_trace_prepare_block(&trace, block, entry_pc, entry_pc, 0);
+    bool emitted = prepared &&
+            arm64_jit_emit_fast_trace_block(state, block, &trace, tlb, entry_pc);
+    if (!prepared || !emitted) {
+        if (arm64_jit_trace_mode()) {
+            fprintf(stderr,
+                    "[arm64-jit-fast] reject-function entry=0x%llx reason=%s insns=%u guards=%u branch_guards=%u\n",
+                    (unsigned long long) entry_pc,
+                    prepared ? "emit" : "prepare",
+                    trace.block.insn_count,
+                    trace.guard_count,
+                    trace.synthetic_branch_guard_count);
+            for (uint32_t i = 0; i < trace.block.insn_count; i++) {
+                fprintf(stderr,
+                        "[arm64-jit-fast]   trace[%u] pc=0x%llx insn=0x%08x synthetic_lr=%u branch_guard=%u\n",
+                        i,
+                        (unsigned long long) trace.pcs[i],
+                        trace.insns[i],
+                        trace.synthetic_set_lr[i] ? 1u : 0u,
+                        trace.synthetic_branch_guard[i] ? 1u : 0u);
+            }
+        }
+        arm64_jit_free_code(block);
+        free(block->insn_pcs);
+        free(block->insns);
+        free(block->infos);
+        free(block->insn_host_offsets);
+        free(block->entry_code);
+        free(block);
+        return NULL;
+    }
+    if (arm64_jit_trace_mode()) {
+        fprintf(stderr,
+                "[arm64-jit-fast] function entry=0x%llx insns=%u guards=%u branch_guards=%u code=%u\n",
+                (unsigned long long) entry_pc,
+                trace.block.insn_count,
+                trace.guard_count,
+                trace.synthetic_branch_guard_count,
+                block->code_size);
+    }
+    return block;
 }
 
 static bool arm64_jit_emit_inline_scalar_regoff_tlb(struct arm64_jit_emitter *e,
@@ -2633,11 +4060,13 @@ enum arm64_jit_emit_result arm64_jit_emit_branch(struct arm64_jit_emitter *e, ui
             }
         }
         if (is_link) {
+            if (arm64_jit_emit_fast_expanded_bl(e, guest_pc, target))
+                return ARM64_JIT_EMIT_CONTINUE;
             arm64_jit_emit_set_guest_lr(e, guest_pc + 4);
-            arm64_jit_emit_control_transfer_fast_return_imm(e, target, 0);
+            arm64_jit_emit_control_transfer_fast_return_imm_flags(e, guest_pc, target, 0, 1);
             return ARM64_JIT_EMIT_TERMINATE;
         }
-        arm64_jit_emit_control_transfer_fast_return_imm(e, target, 0);
+        arm64_jit_emit_control_transfer_fast_return_imm(e, guest_pc, target, 0);
         return ARM64_JIT_EMIT_TERMINATE;
     }
     if ((insn & 0x7e000000u) == 0x34000000u) {
@@ -2670,7 +4099,7 @@ enum arm64_jit_emit_result arm64_jit_emit_branch(struct arm64_jit_emitter *e, ui
         }
         arm64_jit_emit_conditional_transfer_fast_return(e,
                 arm64_jit_enc_cbz_cbnz(sf, nonzero, (unsigned) host_rt, 2),
-                guest_pc + 4, target, 2);
+                guest_pc, guest_pc + 4, target, 2);
         return ARM64_JIT_EMIT_TERMINATE;
     }
     if ((insn & 0xff000010u) == 0x54000000u) {
@@ -2686,7 +4115,7 @@ enum arm64_jit_emit_result arm64_jit_emit_branch(struct arm64_jit_emitter *e, ui
         }
         arm64_jit_emit_conditional_transfer_fast_return(e,
                 arm64_jit_enc_b_cond((enum arm64_cond) (insn & 0xf), 2),
-                guest_pc + 4, guest_pc + arm64_branch_imm19(insn), 1);
+                guest_pc, guest_pc + 4, guest_pc + arm64_branch_imm19(insn), 1);
         return ARM64_JIT_EMIT_TERMINATE;
     }
     if ((insn & 0x7e000000u) == 0x36000000u) {
@@ -2722,7 +4151,7 @@ enum arm64_jit_emit_result arm64_jit_emit_branch(struct arm64_jit_emitter *e, ui
         }
         arm64_jit_emit_conditional_transfer_fast_return(e,
                 arm64_jit_enc_tbz_tbnz(b5, nonzero, bit40, (unsigned) host_rt, 2),
-                guest_pc + 4, target, 3);
+                guest_pc, guest_pc + 4, target, 3);
         return ARM64_JIT_EMIT_TERMINATE;
     }
     if ((insn & 0xfe000000u) == 0xd6000000u) {
@@ -3307,7 +4736,7 @@ static void arm64_jit_emit_internal_fallthrough(struct arm64_jit_emitter *e,
             return;
         }
     }
-    arm64_jit_emit_control_transfer_fast_return_imm(e, target_pc, 0);
+    arm64_jit_emit_control_transfer_fast_return_imm(e, branch_pc, target_pc, 0);
 }
 
 static void arm64_jit_reset_emit_metadata(struct arm64_jit_block *block) {
@@ -3319,6 +4748,7 @@ static void arm64_jit_reset_emit_metadata(struct arm64_jit_block *block) {
     block->code_size = 0;
     block->pc_map_count = 0;
     block->verify_site_count = 0;
+    block->fast_trace_count = 0;
     block->fixup_count = 0;
     block->exit_epilogue_branch_count = 0;
     block->body_code_size = 0;
@@ -3365,7 +4795,9 @@ static bool arm64_jit_emit_block_contents(struct arm64_jit_emitter *e) {
         }
     }
     if (island_open) {
-        arm64_jit_emit_control_transfer_fast_return_imm(e, block->end_pc, 0);
+        addr_t source_pc = block->insn_count != 0 ?
+                block->insn_pcs[block->insn_count - 1] : block->start_pc;
+        arm64_jit_emit_control_transfer_fast_return_imm(e, source_pc, block->end_pc, 0);
     }
 
     uint32_t exit_epilogue_off = (uint32_t) e->size;
@@ -3421,11 +4853,12 @@ static size_t arm64_jit_code_cap_for_estimate(size_t estimate) {
 }
 
 size_t arm64_jit_estimate_block_code_size(struct arm64_jit_state *state,
-        struct arm64_jit_block *block) {
+        struct arm64_jit_block *block, struct tlb *tlb) {
     arm64_jit_reset_emit_metadata(block);
     struct arm64_jit_emitter dry = {
         .state = state,
         .block = block,
+        .tlb = tlb,
         .buf = NULL,
         .cap = SIZE_MAX,
         .size = 0,
@@ -3441,13 +4874,14 @@ size_t arm64_jit_estimate_block_code_size(struct arm64_jit_state *state,
     return arm64_jit_code_cap_for_estimate(dry.size);
 }
 
-void arm64_jit_emit_block(struct arm64_jit_state *state, struct arm64_jit_block *block) {
+void arm64_jit_emit_block(struct arm64_jit_state *state, struct arm64_jit_block *block,
+        struct tlb *tlb) {
     size_t min_cap = 0;
     size_t cap = 0;
     arm64_jit_free_code(block);
 
 retry_without_local_fixups:
-    cap = arm64_jit_estimate_block_code_size(state, block);
+    cap = arm64_jit_estimate_block_code_size(state, block, tlb);
     if (cap == 0 || cap > UINT32_MAX) {
         arm64_jit_reset_emit_metadata(block);
         return;
@@ -3464,6 +4898,7 @@ retry_with_current_cap:
     struct arm64_jit_emitter e = {
         .state = state,
         .block = block,
+        .tlb = tlb,
         .buf = buf,
         .cap = cap,
         .size = 0,

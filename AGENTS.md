@@ -437,6 +437,118 @@ the same fast control-transfer resolver as other nonlocal control transfers and
 only fall back to C dispatch on resolver miss. Do not reintroduce C-managed
 nested direct-call continuation semantics for `BL`.
 
+## Fast JIT V1
+
+Fast JIT V1 is opt-in:
+
+```bash
+ISH_ARM64_JIT_FAST=1
+```
+
+Verifier mode disables Fast JIT V1 automatically. In V1, verifier runs must
+still use the normal slow-JIT implementations with only verifier `brk` sites
+added.
+
+Current safety state:
+
+- `ISH_ARM64_JIT_FAST=1` enables edge profiling, hot-edge trace compilation,
+  function-entry profiling/tiering, fast-trace cache lookup, and standalone
+  fast-trace execution.
+- Verifier mode forcibly disables Fast JIT V1.
+- A newly compiled fast trace is installed for future natural dispatches only.
+  Do not rewind `cpu->pc` to replay the already-executed hot source edge in the
+  same dispatch; that re-executes code against later architectural state.
+
+Current V1 direction:
+
+- Fast traces are expanded from hot branch-heavy source PCs, not from cold
+  opportunistic fixed calls.
+- A small PC-indexed fast-trace cache and standalone synthetic fast block
+  emitter exist. Fast trace blocks are not published into normal slow-fragment
+  maps; cache replacement owns and discards them directly.
+- Fixed-target/control JITABI helpers receive `source_pc` in `x3`
+  (`x0=rt`, `x1=target_pc`, `x2=kind`, `x3=source_pc`). Branch-register
+  JITABI helpers already receive source PC and resolved target. When
+  `ISH_ARM64_JIT_FAST=1`, these helpers update a small edge-profile table
+  directly without calling C on fast hits.
+- The trace builder follows bounded fixed `BL`/`B` expansion and emits the
+  expanded body through the normal slow-JIT instruction emitters. Do not add
+  opcode whitelists for fast traces.
+- Function-entry trace construction uses a reachable-PC pending-target stack,
+  not a blind linear scan. Conditional branches append once, continue the
+  fallthrough path, and queue the other reachable target; terminal `RET` and
+  unconditional `B` pop the next pending target. This prevents a function trace
+  from running past a return into the next sequential function while still
+  covering real loops.
+- V1 function traces are intentionally limited to the current safe target class:
+  exactly one guarded observed indirect target and at least one local backedge.
+  Multi-guard function traces have exposed incorrect behavior in `/sbin/apk
+  stats`; do not relax this until the function-tier ABI/dataflow model can prove
+  those traces safe.
+- Generic trace path guards currently cover `B.cond`, `CBZ`/`CBNZ`, and
+  `TBZ`/`TBNZ`; rejected traces should log the first unsupported frontier when
+  `ISH_ARM64_JIT_TRACE=1` is enabled.
+- Indirect branches inside an expanded trace are allowed only when generic
+  trace dataflow can prove the branch register came from a known guest memory
+  load. The emitted fast trace guards that memory address against the observed
+  target value before executing the expanded body.
+- Guard miss falls back to the normal slow-JIT control-transfer path.
+- Trace emission must preflight with a dry-run emitter before writing real code;
+  a rejected trace candidate must not leave partial bytes in the source
+  fragment.
+- Standalone fast-trace blocks are leaf tiering units. They must not record
+  edge-profile requests that recursively compile more fast traces while the fast
+  trace itself is executing.
+- Function-entry fast traces are entered only from `BL`/`BLR` helper paths via a
+  target-PC function trace cache lookup. C/top-level dispatch intentionally
+  ignores `ARM64_JIT_FAST_TRACE_FUNCTION` entries; otherwise workloads such as
+  `/sbin/apk stats` can repeatedly dispatch into standalone function traces and
+  fail to make useful forward progress.
+- Helper-entered function traces execute only fast-trace-emitted code with the
+  fast trace's own cached register map. They must not jump into original
+  slow-JIT fragment host code. Terminal guest `RET` is emitted normally and
+  returns through the existing branch-register fast helper, so steady-state
+  returns can stay in the JIT-to-JIT path.
+- Helper-profile output now reports `fast_trace emits`, `dispatch_hits`,
+  `runs`, and `guard_exits`. `dispatch_hits/runs` count C-dispatched traces,
+  not helper-entered function traces.
+- BL/BLR/RET JITABI call-stack profiler hooks are live under
+  `ISH_ARM64_JIT_FAST=1`. The profiler is intentionally cleared before entering
+  a fast trace so fast traces remain leaf tiering units and do not recursively
+  request more fast traces from inside optimized code.
+
+Guard fallback test hook:
+
+```bash
+timeout 25s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_FAST=1 \
+  ISH_ARM64_JIT_FAST_FORCE_GUARD_FAIL=1 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs \
+  /usr/bin/sysbench cpu --cpu-max-prime=20000 run
+```
+
+Use `ISH_ARM64_JIT_TRACE=1` with a bounded sysbench run to confirm whether a
+trace was emitted:
+
+```bash
+timeout 25s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_FAST=1 \
+  ISH_ARM64_JIT_TRACE=1 \
+  ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs \
+  /usr/bin/sysbench cpu --cpu-max-prime=20000 run \
+  > /private/tmp/sysbench_fast.stdout 2> /private/tmp/sysbench_fast.stderr
+rg "arm64-jit-fast" /private/tmp/sysbench_fast.stderr
+```
+
+The current known-good sysbench CPU fast-function target is the prime-loop
+function around `0xefdd46c8`. With dump filtering enabled, the expected fast
+trace shape is approximately:
+
+- `function entry=0xefdd46c8 insns=30 guards=1 branch_guards=0`
+- fast dump range `0xefdd46c8..0xefdd4730`
+- contains the prime loop `0xefdd46e0..0xefdd472c`
+- inlines the observed indirect callee path through `0xefdc7920` to
+  `fsqrt d0, d0`
+- does not include the next sequential function at `0xefdd4730`
+
 ## Dump Mode
 
 Dump mode is independent of verifier mode and works in plain JIT mode.

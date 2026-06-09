@@ -7,6 +7,7 @@
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 #include "emu/arch/arm64/decode.h"
 #include "emu/cpu.h"
@@ -24,6 +25,11 @@
 #define ARM64_JIT_FRAGMENT_TLB_WAYS 2
 #define ARM64_JIT_CODE_PAGE_MAP_SIZE (1 << 12)
 #define ARM64_JIT_PC_TARGET_CACHE_SIZE 256
+#define ARM64_JIT_EDGE_PROFILE_SIZE 256
+#define ARM64_JIT_FAST_TRACE_CACHE_SIZE 64
+#define ARM64_JIT_FAST_RECOMPILE_CACHE_SIZE 256
+#define ARM64_JIT_FAST_CALL_STACK_DEPTH 8
+#define ARM64_JIT_FAST_FUNC_SCORE_THRESHOLD 4096
 #define ARM64_JIT_EXEC_PAGE_HINT_BITS (1 << 16)
 #define ARM64_JIT_CODE_PAGE_FAST_SCAN_LIMIT 32
 #define ARM64_JIT_MAX_INSNS 1024
@@ -31,6 +37,7 @@
 #define ARM64_JIT_SCAN_HARD_LIMIT ARM64_JIT_MAX_INSNS
 #define ARM64_JIT_MAX_PC_MAP 2048
 #define ARM64_JIT_MAX_FIXUPS 2048
+#define ARM64_JIT_MAX_FAST_TRACES 16
 #define ARM64_JIT_MAX_GPR_USES 6
 #define ARM64_JIT_MAX_ALLOCATABLE_GPRS 18
 #define ARM64_JIT_TARGET_NATURAL_BOUNDARY_INSNS 128
@@ -98,6 +105,41 @@ struct arm64_jit_verify_site {
     uint32_t insn;
 };
 
+enum arm64_jit_fast_trace_kind {
+    ARM64_JIT_FAST_TRACE_EXPANDED = 1,
+    ARM64_JIT_FAST_TRACE_FUNCTION = 2,
+};
+
+enum arm64_jit_edge_kind {
+    ARM64_JIT_EDGE_DISPATCH = 0,
+    ARM64_JIT_EDGE_BRANCH_REG = 1,
+    ARM64_JIT_EDGE_CBZ_CBNZ = 2,
+    ARM64_JIT_EDGE_B_COND = 3,
+    ARM64_JIT_EDGE_TBZ_TBNZ = 4,
+};
+
+struct arm64_jit_edge_profile_entry {
+    _Atomic uint64_t count;
+    _Atomic uint64_t source_pc;
+    _Atomic uint64_t target_pc;
+    _Atomic uint64_t observed_target;
+    _Atomic uint32_t kind;
+    uint32_t reserved0;
+    uint64_t reserved1[3];
+};
+
+struct arm64_jit_fast_trace {
+    uint32_t kind;
+    uint32_t code_offset;
+    uint32_t inlined_insns;
+    addr_t entry_pc;
+    addr_t exit_pc;
+    addr_t thunk_pc;
+    addr_t guard_addr;
+    uint64_t guard_value;
+    unsigned invalidate_gen;
+};
+
 struct arm64_jit_block;
 struct arm64_jit_code_slab;
 
@@ -141,6 +183,8 @@ struct arm64_jit_block {
     struct arm64_jit_pc_map pc_map[ARM64_JIT_MAX_PC_MAP];
     uint32_t verify_site_count;
     struct arm64_jit_verify_site verify_sites[ARM64_JIT_MAX_VERIFY_SITES];
+    uint32_t fast_trace_count;
+    struct arm64_jit_fast_trace fast_traces[ARM64_JIT_MAX_FAST_TRACES];
     uint32_t fixup_count;
     struct arm64_jit_local_fixup fixups[ARM64_JIT_MAX_FIXUPS];
     uint32_t disabled_local_fixup_count;
@@ -151,6 +195,8 @@ struct arm64_jit_block {
     uint32_t code_slab_offset;
     uint32_t exit_epilogue_branch_count;
     uint32_t exit_epilogue_branches[ARM64_JIT_MAX_FIXUPS];
+    bool is_fast_trace;
+    bool fast_trace_jit_handoff_safe;
 };
 
 struct arm64_jit_entrypoint {
@@ -211,6 +257,39 @@ struct arm64_jit_pc_target_cache_entry {
     void *target_host;
 };
 
+#define ARM64_JIT_FAST_FUNC_FLAG_INELIGIBLE (1u << 0)
+#define ARM64_JIT_FAST_FUNC_FLAG_REQUESTED (1u << 1)
+#define ARM64_JIT_FAST_FUNC_FLAG_HAS_FAST (1u << 2)
+
+struct arm64_jit_fast_func_meta_entry {
+    addr_t entry_pc;
+    unsigned invalidate_gen;
+    uint32_t score;
+    uint32_t flags;
+    uint32_t reserved;
+    struct arm64_jit_block *fast_block;
+    uint64_t reserved1[4];
+};
+
+struct arm64_jit_fast_recompile_cache_entry {
+    addr_t source_pc;
+    addr_t target_pc;
+    unsigned invalidate_gen;
+    uint32_t kind;
+};
+
+struct arm64_jit_fast_trace_cache_entry {
+    addr_t entry_pc;
+    addr_t target_pc;
+    unsigned invalidate_gen;
+    uint32_t kind;
+    struct arm64_jit_block *block;
+    void *jit_entry_fn;
+    void *spill_state_fn;
+    void *reload_state_fn;
+    void *light_spill_state_fn;
+};
+
 struct arm64_jit_state {
     struct mmu *mmu;
     struct list *hash;
@@ -225,6 +304,12 @@ struct arm64_jit_state {
     size_t code_page_map_size;
     struct arm64_jit_pc_target_cache_entry *pc_target_cache;
     size_t pc_target_cache_size;
+    struct arm64_jit_fast_func_meta_entry *fast_func_meta;
+    size_t fast_func_meta_size;
+    struct arm64_jit_fast_trace_cache_entry *fast_trace_cache;
+    size_t fast_trace_cache_size;
+    struct arm64_jit_fast_recompile_cache_entry *fast_recompile_cache;
+    size_t fast_recompile_cache_size;
     _Atomic uint64_t *exec_page_hint_words;
     size_t exec_page_hint_word_count;
     struct arm64_jit_page_bucket *page_hash;
@@ -260,6 +345,18 @@ struct arm64_jit_runtime {
     size_t code_page_map_size;
     struct arm64_jit_pc_target_cache_entry *pc_target_cache;
     size_t pc_target_cache_size;
+    struct arm64_jit_fast_func_meta_entry *fast_func_meta;
+    size_t fast_func_meta_size;
+    struct arm64_jit_edge_profile_entry *edge_profile;
+    size_t edge_profile_size;
+    addr_t fast_recompile_source_pc;
+    addr_t fast_recompile_target_pc;
+    uint32_t fast_recompile_kind;
+    uint32_t fast_recompile_reserved;
+    struct arm64_jit_fast_trace_cache_entry *fast_trace_cache;
+    size_t fast_trace_cache_size;
+    void *fast_call_profiler;
+    addr_t fast_func_request_pc;
 };
 
 struct arm64_jit_tlb_profile {
@@ -268,7 +365,25 @@ struct arm64_jit_tlb_profile {
     _Atomic uint64_t bench_integer_misses;
 };
 
+struct arm64_jit_fast_func_asm_profile {
+    uint64_t pushes;
+    uint64_t rets;
+    uint64_t ret_matches;
+    uint64_t ret_mismatches;
+    uint64_t record_gain;
+};
+
+struct arm64_jit_fast_func_asm_top_entry {
+    uint64_t entry_pc;
+    uint32_t score;
+    uint32_t flags;
+};
+
 extern struct arm64_jit_tlb_profile g_arm64_jit_tlb_profile;
+extern struct arm64_jit_fast_func_asm_profile g_arm64_jit_fast_func_asm_profile;
+extern struct arm64_jit_fast_func_asm_top_entry g_arm64_jit_fast_func_asm_top[8];
+extern struct arm64_jit_edge_profile_entry
+        g_arm64_jit_edge_profile[ARM64_JIT_EDGE_PROFILE_SIZE];
 
 struct arm64_jit_helper_profile_snapshot {
     uint64_t dispatch_blocks;
@@ -301,6 +416,11 @@ struct arm64_jit_helper_profile_snapshot {
     uint64_t syscall;
     uint64_t unsupported;
     uint64_t misc_helper;
+    uint64_t fast_trace_emit_total;
+    uint64_t fast_trace_emit_expanded;
+    uint64_t fast_trace_dispatch_hits;
+    uint64_t fast_trace_runs;
+    uint64_t fast_trace_guard_exits;
 };
 
 void arm64_jit_get_helper_profile_snapshot(struct arm64_jit_helper_profile_snapshot *out);
@@ -336,6 +456,7 @@ extern struct arm64_jit_branch_fast_profile g_arm64_jit_branch_fast_profile;
 struct arm64_jit_emitter {
     struct arm64_jit_state *state;
     struct arm64_jit_block *block;
+    struct tlb *tlb;
     uint8_t *buf;
     size_t cap;
     size_t size;
@@ -376,6 +497,11 @@ void arm64_jit_abort_code_batch(struct arm64_jit_state *state);
 
 int arm64_jit_trace_mode(void);
 int arm64_jit_verify_mode(void);
+int arm64_jit_fast_mode(void);
+int arm64_jit_fast_force_guard_fail_mode(void);
+bool arm64_jit_fast_skip_pc(addr_t pc);
+bool arm64_jit_fast_edge_hot(addr_t source_pc, addr_t target_pc);
+void arm64_jit_profile_fast_trace_emit(uint32_t kind);
 addr_t arm64_jit_verify_filter_pc(void);
 uint64_t arm64_jit_verify_start_block(void);
 int arm64_jit_branch_reg_fast_mode(void);
@@ -402,6 +528,12 @@ int arm64_jit_helper_dispatch(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_branch_reg(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_branch_reg_fast_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc,
         uint32_t insn, uint64_t target);
+void arm64_jit_fast_func_record_gain(struct arm64_jit_runtime *rt, addr_t entry_pc,
+        uint32_t gain);
+void arm64_jit_fast_func_profile_control_jitabi(struct arm64_jit_runtime *rt,
+        addr_t source_pc, addr_t target_pc, uint64_t packed_kind);
+void arm64_jit_fast_func_profile_branch_reg_jitabi(struct arm64_jit_runtime *rt,
+        addr_t guest_pc, uint32_t insn, addr_t target_pc);
 int arm64_jit_helper_cbz_cbnz(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_b_cond(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_tbz_tbnz(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
@@ -451,7 +583,7 @@ int arm64_jit_helper_syscall_jitabi(struct arm64_jit_runtime *rt, addr_t guest_p
 int arm64_jit_helper_verify_trap_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_dispatch_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc);
 int arm64_jit_helper_control_transfer_fast_jitabi(struct arm64_jit_runtime *rt,
-        addr_t target_pc, uint64_t kind);
+        addr_t target_pc, uint64_t kind, addr_t source_pc);
 int arm64_jit_helper_branch_reg_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_cbz_cbnz_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
 int arm64_jit_helper_b_cond_jitabi(struct arm64_jit_runtime *rt, addr_t guest_pc, uint32_t insn);
@@ -539,9 +671,14 @@ enum arm64_jit_emit_result arm64_jit_emit_exception(struct arm64_jit_emitter *e,
 enum arm64_jit_emit_result arm64_jit_emit_system(struct arm64_jit_emitter *e, uint32_t insn, addr_t guest_pc);
 enum arm64_jit_emit_result arm64_jit_emit_ld_st(struct arm64_jit_emitter *e, uint32_t insn, addr_t guest_pc);
 enum arm64_jit_emit_result arm64_jit_emit_simd_fp(struct arm64_jit_emitter *e, uint32_t insn, addr_t guest_pc);
-void arm64_jit_emit_block(struct arm64_jit_state *state, struct arm64_jit_block *block);
+void arm64_jit_emit_block(struct arm64_jit_state *state, struct arm64_jit_block *block,
+        struct tlb *tlb);
 size_t arm64_jit_estimate_block_code_size(struct arm64_jit_state *state,
-        struct arm64_jit_block *block);
+        struct arm64_jit_block *block, struct tlb *tlb);
+struct arm64_jit_block *arm64_jit_compile_fast_trace(struct arm64_jit_state *state,
+        addr_t source_pc, addr_t target_pc, uint32_t kind, struct tlb *tlb);
+struct arm64_jit_block *arm64_jit_compile_fast_function(struct arm64_jit_state *state,
+        addr_t entry_pc, struct tlb *tlb);
 
 #endif
 

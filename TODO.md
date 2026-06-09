@@ -3,6 +3,79 @@
 Track active ARM64 JIT work here. Remove items when finished, and add subitems
 when a task needs to be split.
 
+## Fast JIT V1
+
+- Replace edge-hot selection with function-entry tiering.
+  - Keep the current 64-byte first-level PC target cache unchanged.
+  - Same-index sidecar metadata cache for fast-function score/status is live.
+  - Tiny speculative per-runtime call profiler stack is live. It is not a
+    faithful guest stack; on overflow, RET mismatch, known-ineligible callee, or
+    confusing control flow, it clears and relearns.
+  - BL/BLR/RET JITABI helpers maintain the stack without calling C: BL/BLR
+    increments parent gain and pushes callee; matching RET pops callee, adds
+    child gain to parent, and accumulates the callee entry score.
+  - Non-call helper-mediated branches inside an initialized frame increment that
+    frame's gain only.
+  - When a function-entry score crosses threshold, the helper records a runtime
+    request PC. C runtime compiles after block return.
+  - Function fast JIT must re-emit the selected function with its own cached
+    register map. Do not reuse or jump into slow-JIT fragments.
+  - Function traces are entered only from call helpers. C/top-level dispatch
+    must ignore `ARM64_JIT_FAST_TRACE_FUNCTION`; allowing C dispatch to enter
+    function traces made `/sbin/apk stats` time out.
+  - Terminal guest `RET` in function traces should stay emitted as a normal
+    branch-register fast helper path. Do not replace it with full-spill plus C
+    dispatch to LR.
+  - Function-entry trace construction now uses a reachable-PC pending-target
+    stack instead of blind linear scanning. This compiles real loops and avoids
+    pulling in the next sequential function after a terminal `RET`.
+  - V1 function traces are gated to exactly one guarded observed indirect target
+    plus at least one local backedge. This keeps the sysbench prime trace while
+    rejecting broader multi-guard apk traces that are not yet safe.
+  - Sysbench prime loop is now identified as `0xefdd46c8` and compiled into a
+    compact function trace: 30 guest instructions, one guarded indirect target,
+    inlined path through `0xefdc7920` to `fsqrt d0, d0`, and local loop branches
+    through `0xefdd46e0..0xefdd472c`.
+  - Remaining work: improve function selection so small or branch-guard-heavy
+    traces do not dominate, add accounting for helper-entered function trace
+    hits because current `fast_trace runs` only counts C-dispatched traces, and
+    make multi-guard function traces safe before relaxing the V1 gate.
+- Complete the guarded branch-heavy trace tier without workload-specific shapes.
+  - `ISH_ARM64_JIT_FAST=1` enables V1; verifier mode must keep it disabled.
+  - Do not add sysbench-specific, fsqrt-specific, PLT-specific, or opcode
+    whitelist logic. Trace construction should use normal A64 decode plus the
+    existing slow-JIT emitters as the semantic source of truth.
+  - Current generic builder can follow bounded fixed `BL`/forward `B` expansion
+    and can guard indirect branches when dataflow proves the branch register was
+    loaded from a known guest memory address.
+  - JITABI fixed-control and branch-register helpers now record source/target
+    edge counts directly in a runtime edge table when Fast JIT is enabled,
+    without calling C on fast hits.
+- Move from inline-at-source-block expansion to true runtime tiering.
+  - Small PC-indexed standalone fast-trace cache and synthetic block emitter
+    exist and execute under `ISH_ARM64_JIT_FAST=1`.
+  - Keep the no-replay invariant: compiling a trace from a hot edge must install
+    it for future dispatches, not rewind and re-execute the edge that just ran
+    through the slow JIT.
+  - Keep standalone fast traces as leaf tiering units; do not let them generate
+    recursive fast-recompile requests while executing.
+  - Continue validating guard-miss fallback with
+    `ISH_ARM64_JIT_FAST_FORCE_GUARD_FAIL=1`.
+  - Fast traces must re-emit all inlined code with their own cached register
+    map. Do not jump from fast trace completion into original slow-JIT source
+    fragment host code.
+  - Current sysbench CPU result with `ISH_ARM64_JIT_FAST=1` and the prime-loop
+    function trace is about 4,100 events/s on this host, up from the previous
+    ~1,900-2,000 events/s slow-function-tier result.
+- Expand generic trace construction.
+  - Add conditional-branch trace support with bounded path selection from
+    observed edges.
+  - Generic conditional guards now cover `B.cond`, `CBZ/CBNZ`, and `TBZ/TBNZ`.
+  - Add more generic constant/dataflow cases only as needed for resolving
+    indirect targets; keep each assumption guarded or invalidation-covered.
+  - Reject recursion and excessive expansion size, but do not reject purely
+    because a normal slow-JIT emitter handles the instruction.
+
 ## Fragment Cache And JIT Fast Paths
 
 - Continue hardening the default branch-reg 3-tier path.
