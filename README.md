@@ -143,9 +143,31 @@ The ARM64 app target uses:
 - xcconfig: `app/AppARM64.xcconfig`
 - Guest arch: `aarch64`
 
-### Build an ad-hoc `.ipa` for sideloading / jailbroken devices
+### Build an ad-hoc `.tipa` for TrollStore / sideloading
 
-If you do not want Xcode provisioning, you can build the app and file provider unsigned, then ad-hoc sign the final bundle:
+If you do not want Xcode provisioning, use the packaging script to build the app
+and file provider unsigned, ad-hoc sign both binaries, embed the file provider,
+and zip the final TIPA:
+
+```bash
+tools/package_arm64_trollstore_ipa.sh
+```
+
+The default output path is:
+
+```bash
+build/iSH-ARM64-JIT-TrollStore.tipa
+```
+
+The script accepts these optional environment overrides:
+
+- `BUILD_TIMEOUT`, default `180s`
+- `OUTPUT_IPA`, default `build/iSH-ARM64-JIT-TrollStore.tipa`
+- `APP_BUNDLE_ID`, default `app.ish.iSH.arm64`
+- `APP_GROUP_ID`, default `group.app.ish.iSH.arm64`
+- `APPEX_BUNDLE_ID`, default `$APP_BUNDLE_ID.FileProvider`
+
+The underlying unsigned build commands are:
 
 ```bash
 xcodebuild -project iSH.xcodeproj -scheme 'iSH-ARM64' -configuration Release \
@@ -163,17 +185,11 @@ This repository already contains working ad-hoc packaging examples under `app/`:
 - `app/iSH-ARM64-ad-hoc.entitlements`
 - `app/iSH-ARM64-FileProvider-ad-hoc.entitlements`
 
-The packaged output path used in local testing is:
-
-```bash
-build/iSH-ARM64-ad-hoc.ipa
-```
-
 ### Files app / File Provider
 
 - The ARM64 app depends on the `iSHFileProvider.appex` extension for Files integration.
 - If the extension is not embedded, Files will not show the provider and "Browse Files" will fail.
-- The ad-hoc packaged `.ipa` produced during local testing includes `PlugIns/iSHFileProvider.appex`.
+- `tools/package_arm64_trollstore_ipa.sh` embeds `PlugIns/iSHFileProvider.appex`.
 
 ## Build command line tool for testing
 

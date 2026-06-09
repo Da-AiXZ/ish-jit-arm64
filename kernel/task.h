@@ -104,6 +104,7 @@ struct task {
     // Runtime-selected execution backend for this task.
     // Defaults to CPU_BACKEND_UNSET and is fixed on first execution.
     int exec_backend;
+    int exec_backend_generation;
 
     // current condition/lock, so it can be notified in case of a signal
     cond_t *waiting_cond;

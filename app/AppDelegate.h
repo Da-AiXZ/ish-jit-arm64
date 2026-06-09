@@ -17,6 +17,8 @@
 #endif
 
 + (void)maybePresentStartupMessageOnViewController:(UIViewController *)vc;
++ (void)applyJITPreferences;
++ (void)maybePresentJITEnableAlertOnViewController:(UIViewController *)vc;
 
 @end
 
@@ -25,4 +27,3 @@ extern NSString *const ProcessExitedNotification;
 #else
 extern NSString *const KernelPanicNotification;
 #endif
-

@@ -26,6 +26,8 @@ static NSString *const kPreferenceCursorStyleKey = @"Cursor Style";
 static NSString *const kPreferenceBlinkCursorKey = @"Blink Cursor";
 NSString *const kPreferenceHideStatusBarKey = @"Status Bar";
 static NSString *const kPreferenceColorSchemeKey = @"Color Scheme";
+static NSString *const kPreferenceArm64JITEnabledKey = @"ARM64 JIT Enabled";
+static NSString *const kPreferenceArm64FastJITEnabledKey = @"ARM64 Fast JIT Enabled";
 // This key has a different naming scheme because it's used in UI tests as a
 // CLI argument.
 NSString *const kHostnameOverrideKey = @"hostnameOverride";
@@ -166,6 +168,8 @@ bool (*remove_user_default)(const char *name);
             kPreferenceCursorStyleKey: @(CursorStyleBlock),
             kPreferenceHideStatusBarKey: @(NO),
             kPreferenceColorSchemeKey: @(ColorSchemeMatchSystem),
+            kPreferenceArm64JITEnabledKey: @(NO),
+            kPreferenceArm64FastJITEnabledKey: @(YES),
             kPreferenceThemeKey: @"Default",
             kHostnameOverrideKey: UIDevice.currentDevice.name,
         }];
@@ -200,6 +204,8 @@ bool (*remove_user_default)(const char *name);
             @"blink_cursor": kPreferenceBlinkCursorKey,
             @"hide_status_bar": kPreferenceHideStatusBarKey,
             @"color_scheme": kPreferenceColorSchemeKey,
+            @"arm64_jit_enabled": kPreferenceArm64JITEnabledKey,
+            @"arm64_fast_jit_enabled": kPreferenceArm64FastJITEnabledKey,
             @"theme": kPreferenceThemeKey,
             @"hostname_override": kHostnameOverrideKey,
         };
@@ -225,6 +231,8 @@ bool (*remove_user_default)(const char *name);
             kPreferenceBlinkCursorKey: property(blinkCursor),
             kPreferenceHideStatusBarKey: property(hideStatusBar),
             kPreferenceColorSchemeKey: property(colorScheme),
+            kPreferenceArm64JITEnabledKey: property(arm64JITEnabled),
+            kPreferenceArm64FastJITEnabledKey: property(arm64FastJITEnabled),
             // This one is a little bit special, so it needs extra handling.
             // The backing property for this is intentionally underscored.
             kPreferenceThemeKey: @"userTheme",
@@ -522,6 +530,32 @@ bool (*remove_user_default)(const char *name);
 }
 
 - (BOOL)validateHideStatusBar:(id *)value error:(NSError **)error {
+    return [*value isKindOfClass:NSNumber.class];
+}
+
+// MARK: arm64JITEnabled
+- (BOOL)arm64JITEnabled {
+    return [_defaults boolForKey:kPreferenceArm64JITEnabledKey];
+}
+
+- (void)setArm64JITEnabled:(BOOL)arm64JITEnabled {
+    [_defaults setBool:arm64JITEnabled forKey:kPreferenceArm64JITEnabledKey];
+}
+
+- (BOOL)validateArm64JITEnabled:(id *)value error:(NSError **)error {
+    return [*value isKindOfClass:NSNumber.class];
+}
+
+// MARK: arm64FastJITEnabled
+- (BOOL)arm64FastJITEnabled {
+    return [_defaults boolForKey:kPreferenceArm64FastJITEnabledKey];
+}
+
+- (void)setArm64FastJITEnabled:(BOOL)arm64FastJITEnabled {
+    [_defaults setBool:arm64FastJITEnabled forKey:kPreferenceArm64FastJITEnabledKey];
+}
+
+- (BOOL)validateArm64FastJITEnabled:(id *)value error:(NSError **)error {
     return [*value isKindOfClass:NSNumber.class];
 }
 

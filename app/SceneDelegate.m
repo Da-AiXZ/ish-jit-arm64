@@ -6,6 +6,7 @@
 //
 
 #import "SceneDelegate.h"
+#import "AppDelegate.h"
 #import "AboutViewController.h"
 
 TerminalViewController *currentTerminalViewController = NULL;
@@ -55,6 +56,8 @@ static NSString *const TerminalUUID = @"TerminalUUID";
 - (void)sceneDidBecomeActive:(UIScene *)scene {
     TerminalViewController *terminalViewController = (TerminalViewController *) self.window.rootViewController;;
     currentTerminalViewController = terminalViewController;
+    [AppDelegate applyJITPreferences];
+    [AppDelegate maybePresentJITEnableAlertOnViewController:terminalViewController];
 }
 
 - (void)sceneWillResignActive:(UIScene *)scene {

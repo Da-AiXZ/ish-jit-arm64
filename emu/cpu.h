@@ -35,6 +35,8 @@ void cpu_log_interrupt_boundary(const char *who, const struct cpu_state *cpu, in
 #if defined(GUEST_ARM64) && defined(__aarch64__)
 int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb);
 void arm64_jit_invalidate_page(struct mmu *mmu, page_t page);
+void cpu_set_arm64_jit_enabled(int enabled);
+int cpu_get_arm64_jit_enabled(void);
 #endif
 void cpu_poke(struct cpu_state *cpu);
 

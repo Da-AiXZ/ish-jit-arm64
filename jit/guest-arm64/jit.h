@@ -472,9 +472,13 @@ void arm64_jit_free_code(struct arm64_jit_block *block);
 void arm64_jit_begin_code_batch(struct arm64_jit_state *state, size_t reserve_size);
 bool arm64_jit_finish_code_batch(struct arm64_jit_state *state);
 void arm64_jit_abort_code_batch(struct arm64_jit_state *state);
+bool arm64_jit_probe_executable_memory(void);
+bool arm64_jit_process_has_jit(void);
 
 int arm64_jit_trace_mode(void);
 int arm64_jit_verify_mode(void);
+void arm64_jit_set_fast_enabled(int enabled);
+int arm64_jit_get_fast_enabled(void);
 int arm64_jit_fast_mode(void);
 int arm64_jit_fast_force_guard_fail_mode(void);
 void arm64_jit_profile_fast_trace_emit(uint32_t kind);

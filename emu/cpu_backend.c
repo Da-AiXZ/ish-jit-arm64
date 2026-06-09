@@ -1,20 +1,55 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include "emu/cpu.h"
 #include "emu/interrupt.h"
 #include "kernel/task.h"
 
+#if defined(GUEST_ARM64) && defined(__aarch64__)
+static _Atomic int arm64_jit_enabled_override = -1;
+static _Atomic int arm64_jit_backend_generation;
+
+void cpu_set_arm64_jit_enabled(int enabled) {
+    int configured = enabled ? 1 : 0;
+    int previous = atomic_exchange_explicit(&arm64_jit_enabled_override, configured,
+            memory_order_relaxed);
+    if (previous != configured) {
+        atomic_fetch_add_explicit(&arm64_jit_backend_generation, 1,
+                memory_order_release);
+    }
+}
+
+int cpu_get_arm64_jit_enabled(void) {
+    int configured = atomic_load_explicit(&arm64_jit_enabled_override,
+            memory_order_relaxed);
+    if (configured >= 0)
+        return configured;
+
+    const char *value = getenv("ISH_ARM64_BACKEND");
+    return value != NULL && strcmp(value, "arm64_jit") == 0;
+}
+#endif
+
 static int parse_backend_env(void) {
 #if defined(GUEST_ARM64) && defined(__aarch64__)
-    const char *value = getenv("ISH_ARM64_BACKEND");
-    if (value != NULL && strcmp(value, "arm64_jit") == 0)
+    if (cpu_get_arm64_jit_enabled())
         return CPU_BACKEND_ARM64_JIT;
 #endif
     return CPU_BACKEND_THREADED;
 }
 
 int cpu_run_to_interrupt(struct cpu_state *cpu, struct tlb *tlb) {
+#if defined(GUEST_ARM64) && defined(__aarch64__)
+    if (current != NULL) {
+        int generation = atomic_load_explicit(&arm64_jit_backend_generation,
+                memory_order_acquire);
+        if (current->exec_backend_generation != generation) {
+            current->exec_backend = CPU_BACKEND_UNSET;
+            current->exec_backend_generation = generation;
+        }
+    }
+#endif
     if (current != NULL && current->exec_backend == CPU_BACKEND_UNSET)
         current->exec_backend = parse_backend_env();
 

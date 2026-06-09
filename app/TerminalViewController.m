@@ -146,6 +146,7 @@
 
 - (void)viewDidAppear:(BOOL)animated {
     [AppDelegate maybePresentStartupMessageOnViewController:self];
+    [AppDelegate maybePresentJITEnableAlertOnViewController:self];
     [super viewDidAppear:animated];
 }
 

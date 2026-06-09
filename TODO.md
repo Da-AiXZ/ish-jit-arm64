@@ -77,6 +77,44 @@ when a task needs to be split.
   - Reject recursion and excessive expansion size, but do not reject purely
     because a normal slow-JIT emitter handles the instruction.
 
+## TrollStore iOS JIT Build
+
+- Validate the new app settings path on device.
+  - In-app Settings now exposes `Enable ARM64 JIT` and `Enable Fast JIT`.
+  - The ARM64 app target uses `app/iSH-ARM64-ad-hoc.entitlements`, which carries
+    `get-task-allow` plus the existing app group/font entitlements.
+  - Startup/foreground/toggle paths probe the actual executable-code allocator;
+    if unavailable, runtime falls back to threaded execution and prompts the
+    user to switch off JIT or try TrollStore via
+    `apple-magnifier://enable-jit?bundle-id=<bundle id>`.
+  - iOS code-slab creation now uses a single Folium-style RX/RW/RX `mprotect`
+    mapping rather than a `vm_remap` RW/RX alias. The previous alias path
+    crashed on device by entering a `shared memory` region whose current
+    protection was `rw-`.
+  - App-level JIT availability no longer depends on
+    `vm_region_64().protection & VM_PROT_EXECUTE`; that check rejected valid
+    TrollStore/debugger JIT states. The probe attempts the real allocation and
+    protection transition instead.
+  - iOS JIT availability is now also gated on `CS_DEBUGGED`, because device
+    crashes showed `mprotect(PROT_READ | PROT_EXEC)` could appear to succeed
+    while the VM region stayed `r--/rw-`.
+  - Startup now has an Amethyst-style `PT_TRACE_ME` child path when the
+    TrollStore no-sandbox/platform entitlement set is present.
+  - Recovery mode exposes a direct `Disable JIT` button and the normal ARM64
+    JIT/Fast JIT static-table section so a persisted bad JIT preference can be
+    cleared before exiting recovery.
+  - Runtime validation still needs an actual TrollStore-installed device run,
+    because simulator/macOS cannot prove iOS executable-memory entitlement
+    behavior.
+- Keep TrollStore packaging healthy.
+  - `tools/package_arm64_trollstore_ipa.sh` packages and signs both
+    `iSH ARM64.app` and `iSHFileProvider.appex` consistently.
+  - If bundle IDs/app groups change, prefer script environment overrides over
+    editing generated build products manually.
+- Validate on device.
+  - First device smoke should explicitly observe `echo hello`, then compare
+    `/root/cbench_lite_arm64` and `/sbin/apk stats` under the JIT backend.
+
 ## Fragment Cache And JIT Fast Paths
 
 - Continue hardening the default branch-reg 3-tier path.

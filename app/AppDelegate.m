@@ -8,6 +8,7 @@
 #include <resolv.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <TargetConditionals.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #import "AboutViewController.h"
 #import "AppDelegate.h"
@@ -32,6 +33,10 @@
 #include "DebugServer.h"
 #endif
 #include "kernel/native_offload.h"
+#if defined(GUEST_ARM64) && defined(__aarch64__)
+#include "emu/cpu.h"
+#include "jit/guest-arm64/jit.h"
+#endif
 #ifdef ISH_FFMPEG_TEST
 extern void native_builtins_init(void);
 #endif
@@ -75,6 +80,7 @@ void ReportPanic(const char *message) {
 
 static int bootError;
 static NSString *const kSkipStartupMessage = @"Skip Startup Message";
+static BOOL arm64JITAlertPresenting;
 
 @implementation AppDelegate
 
@@ -265,6 +271,50 @@ void SyncHostname(void) {
     [NSUserDefaults.standardUserDefaults setInteger:1 forKey:kSkipStartupMessage];
 }
 
++ (void)applyJITPreferences {
+#if defined(GUEST_ARM64) && defined(__aarch64__)
+    BOOL wantsJIT = UserPreferences.shared.arm64JITEnabled;
+    BOOL jitAvailable = wantsJIT ? arm64_jit_probe_executable_memory() : NO;
+    cpu_set_arm64_jit_enabled(wantsJIT && jitAvailable);
+    arm64_jit_set_fast_enabled(UserPreferences.shared.arm64FastJITEnabled);
+#endif
+}
+
++ (void)maybePresentJITEnableAlertOnViewController:(UIViewController *)vc {
+#if defined(GUEST_ARM64) && defined(__aarch64__) && !TARGET_OS_SIMULATOR
+    if (!UserPreferences.shared.arm64JITEnabled)
+        return;
+    [self applyJITPreferences];
+    if (cpu_get_arm64_jit_enabled())
+        return;
+    if (arm64JITAlertPresenting || vc.presentedViewController != nil)
+        return;
+    arm64JITAlertPresenting = YES;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"JIT Is Not Enabled"
+                                                                   message:@"ARM64 JIT is enabled in iSH settings, but this process cannot currently create executable JIT memory. Enable JIT by attaching a debugger with StikDebug/AltJIT, or ask TrollStore to enable JIT for this app."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Switch Off JIT"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction * _Nonnull action) {
+        UserPreferences.shared.arm64JITEnabled = NO;
+        [self applyJITPreferences];
+        arm64JITAlertPresenting = NO;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Try TrollStore"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction * _Nonnull action) {
+        NSString *bundleID = NSBundle.mainBundle.bundleIdentifier ?: @"";
+        NSString *encodedBundleID = [bundleID stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
+        [UIApplication openURL:[NSString stringWithFormat:@"apple-magnifier://enable-jit?bundle-id=%@", encodedBundleID]];
+        arm64JITAlertPresenting = NO;
+    }]];
+    [vc presentViewController:alert animated:YES completion:nil];
+#else
+    (void) vc;
+#endif
+}
+
 - (BOOL)application:(UIApplication *)application willFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey,id> *)launchOptions {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     if ([defaults boolForKey:@"hail mary"]) {
@@ -275,6 +325,7 @@ void SyncHostname(void) {
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"recovery"])
         return YES;
 
+    [AppDelegate applyJITPreferences];
     bootError = [self boot];
 
 #if ISH_LINUX

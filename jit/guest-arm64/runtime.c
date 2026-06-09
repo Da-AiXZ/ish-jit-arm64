@@ -7,9 +7,18 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+#include <unistd.h>
 #include <ctype.h>
 #include <time.h>
 #include <string.h>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#include <libkern/OSCacheControl.h>
+#if TARGET_OS_IPHONE
+#include <sys/types.h>
+#endif
+#endif
 
 #include "jit/guest-arm64/jit.h"
 #include "emu/tlb.h"
@@ -45,6 +54,7 @@ struct arm64_jit_fast_func_top_entry {
 };
 
 static struct arm64_jit_fast_func_top_entry g_arm64_jit_fast_func_top[8];
+static _Atomic int g_arm64_jit_fast_enabled_override = -1;
 
 static bool arm64_jit_fast_func_profile_enabled(struct arm64_jit_runtime *rt) {
     return rt != NULL && rt->fast_func_meta != NULL && rt->fast_func_meta_size != 0 &&
@@ -330,6 +340,7 @@ struct arm64_jit_compile_batch {
 struct arm64_jit_code_slab {
     struct list chain;
     uint8_t *rw;
+    uint8_t *rx;
     size_t size;
     size_t used;
     uint32_t live_allocs;
@@ -373,23 +384,59 @@ static size_t arm64_jit_round_up_size_runtime(size_t value, size_t align) {
     return value + align - rem;
 }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+#define ARM64_JIT_CS_OPS_STATUS 0
+#define ARM64_JIT_CS_DEBUGGED 0x10000000
+
+bool arm64_jit_process_has_jit(void) {
+    int flags = 0;
+    if (csops(getpid(), ARM64_JIT_CS_OPS_STATUS, &flags, sizeof(flags)) != 0)
+        return false;
+    return (flags & ARM64_JIT_CS_DEBUGGED) != 0;
+}
+#else
+bool arm64_jit_process_has_jit(void) {
+    return true;
+}
+#endif
+
 static struct arm64_jit_code_slab *arm64_jit_create_code_slab(size_t min_size) {
     size_t page_size = (size_t) getpagesize();
     size_t slab_size = arm64_jit_round_up_size_runtime(min_size, page_size);
     if (slab_size == 0)
         slab_size = page_size;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    uint8_t *rw = mmap(NULL, slab_size, PROT_READ | PROT_EXEC,
+            MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (rw == MAP_FAILED) {
+        return NULL;
+    }
+    uint8_t *rx = rw;
+    // This mirrors Folium/oaknut's iPhone path: map executable first, then
+    // rely on CS_DEBUGGED/get-task-allow to allow write transitions.
+    if (mprotect(rw, slab_size, PROT_READ | PROT_WRITE) != 0) {
+        munmap(rw, slab_size);
+        return NULL;
+    }
+#else
     uint8_t *rw = mmap(NULL, slab_size, PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANON, -1, 0);
     if (rw == MAP_FAILED) {
         return NULL;
     }
+    uint8_t *rx = rw;
+#endif
     struct arm64_jit_code_slab *slab = calloc(1, sizeof(*slab));
     if (slab == NULL) {
+        if (rx != rw)
+            munmap(rx, slab_size);
         munmap(rw, slab_size);
         return NULL;
     }
     list_init(&slab->chain);
     slab->rw = rw;
+    slab->rx = rx;
     slab->size = slab_size;
     return slab;
 }
@@ -405,8 +452,16 @@ static bool arm64_jit_seal_code_slab(struct arm64_jit_code_slab *slab) {
         protect_size = page_size;
     if (protect_size > slab->size)
         return false;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    if (slab->rx == NULL || slab->rw == NULL)
+        return false;
+    if (mprotect(slab->rx, protect_size, PROT_READ | PROT_EXEC) != 0)
+        return false;
+#else
     if (mprotect(slab->rw, protect_size, PROT_READ | PROT_EXEC) != 0)
         return false;
+    slab->rx = slab->rw;
+#endif
     slab->executable = true;
     slab->sealed = true;
     return true;
@@ -451,7 +506,7 @@ bool arm64_jit_alloc_code(struct arm64_jit_state *state, struct arm64_jit_block 
     block->code_slab = slab;
     block->code_slab_offset = (uint32_t) slab->used;
     block->code_rw = slab->rw + slab->used;
-    block->code_rx = block->code_rw;
+    block->code_rx = slab->rx + slab->used;
     block->code_map_size = (uint32_t) alloc_size;
     slab->used += alloc_size;
     slab->live_allocs++;
@@ -465,8 +520,12 @@ bool arm64_jit_protect_code(struct arm64_jit_block *block) {
         return false;
     if (block->code_size == 0 || block->code_size > block->code_map_size)
         return false;
+#if defined(__APPLE__)
+    sys_icache_invalidate(block->code_rx, block->code_size);
+#else
     __builtin___clear_cache((char *) block->code_rx,
             (char *) block->code_rx + block->code_size);
+#endif
     return true;
 }
 
@@ -510,8 +569,27 @@ void arm64_jit_abort_code_batch(struct arm64_jit_state *state) {
     if (slab == NULL || slab->live_allocs != 0)
         return;
     list_remove_safe(&slab->chain);
+    if (slab->rx != NULL && slab->rx != slab->rw)
+        munmap(slab->rx, slab->size);
     munmap(slab->rw, slab->size);
     free(slab);
+}
+
+bool arm64_jit_probe_executable_memory(void) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    if (!arm64_jit_process_has_jit())
+        return false;
+#endif
+    struct arm64_jit_code_slab *slab = arm64_jit_create_code_slab((size_t) getpagesize());
+    if (slab == NULL)
+        return false;
+    slab->used = 4;
+    bool ok = arm64_jit_seal_code_slab(slab);
+    if (slab->rx != NULL && slab->rx != slab->rw)
+        munmap(slab->rx, slab->size);
+    munmap(slab->rw, slab->size);
+    free(slab);
+    return ok;
 }
 
 void arm64_jit_free_code(struct arm64_jit_block *block) {
@@ -527,6 +605,8 @@ void arm64_jit_free_code(struct arm64_jit_block *block) {
     if (slab->live_allocs != 0)
         return;
     list_remove_safe(&slab->chain);
+    if (slab->rx != NULL && slab->rx != slab->rw)
+        munmap(slab->rx, slab->size);
     munmap(slab->rw, slab->size);
     free(slab);
 }
@@ -1027,6 +1107,8 @@ void arm64_jit_destroy_mmu(struct mmu *mmu) {
         struct arm64_jit_code_slab *slab, *tmp;
         list_for_each_entry_safe(&state->code_slabs, slab, tmp, chain) {
             list_remove_safe(&slab->chain);
+            if (slab->rx != NULL && slab->rx != slab->rw)
+                munmap(slab->rx, slab->size);
             if (slab->rw != NULL)
                 munmap(slab->rw, slab->size);
             free(slab);
@@ -1067,13 +1149,27 @@ int arm64_jit_verify_mode(void) {
     return verify_mode;
 }
 
-int arm64_jit_fast_mode(void) {
-    static int fast_mode = -1;
-    if (fast_mode == -1) {
+void arm64_jit_set_fast_enabled(int enabled) {
+    atomic_store_explicit(&g_arm64_jit_fast_enabled_override, enabled ? 1 : 0,
+            memory_order_relaxed);
+}
+
+int arm64_jit_get_fast_enabled(void) {
+    int configured = atomic_load_explicit(&g_arm64_jit_fast_enabled_override,
+            memory_order_relaxed);
+    if (configured >= 0)
+        return configured;
+
+    static int env_fast_mode = -1;
+    if (env_fast_mode == -1) {
         const char *env = getenv("ISH_ARM64_JIT_FAST");
-        fast_mode = (env == NULL || env[0] != '0') ? 1 : 0;
+        env_fast_mode = (env == NULL || env[0] != '0') ? 1 : 0;
     }
-    return fast_mode && !arm64_jit_verify_mode();
+    return env_fast_mode;
+}
+
+int arm64_jit_fast_mode(void) {
+    return arm64_jit_get_fast_enabled() && !arm64_jit_verify_mode();
 }
 
 static int arm64_jit_fast_handoff_mode(void) {

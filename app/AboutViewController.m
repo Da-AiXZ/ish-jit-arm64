@@ -38,6 +38,9 @@
 
 @property (weak, nonatomic) IBOutlet NSLayoutConstraint *saddamHussein;
 
+@property (weak, nonatomic) IBOutlet UISwitch *arm64JITSwitch;
+@property (weak, nonatomic) IBOutlet UISwitch *arm64FastJITSwitch;
+
 @end
 
 @implementation AboutViewController
@@ -52,13 +55,16 @@
                                                                                   style:UIBarButtonItemStyleDone
                                                                                  target:self
                                                                                  action:@selector(exitRecovery:)];
-        self.navigationItem.leftBarButtonItem = nil;
+        self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Disable JIT"
+                                                                                 style:UIBarButtonItemStylePlain
+                                                                                target:self
+                                                                                action:@selector(disableArm64JITFromRecovery:)];
     }
     _versionLabel.text = [NSString stringWithFormat:@"iSH %@ (Build %@)",
                           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"],
                           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"]];
 
-    [UserPreferences.shared observe:@[@"capsLockMapping", @"fontSize", @"launchCommand", @"bootCommand"]
+    [UserPreferences.shared observe:@[@"capsLockMapping", @"fontSize", @"launchCommand", @"bootCommand", @"arm64JITEnabled", @"arm64FastJITEnabled"]
                             options:0 owner:self usingBlock:^(typeof(self) self) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self _updateUI];
@@ -86,6 +92,13 @@
     exit(0);
 }
 
+- (void)disableArm64JITFromRecovery:(id)sender {
+    UserPreferences.shared.arm64JITEnabled = NO;
+    UserPreferences.shared.arm64FastJITEnabled = NO;
+    [AppDelegate applyJITPreferences];
+    [self updateArm64JITSettings];
+}
+
 - (void)_updateUI:(NSNotification *)notification {
     [self _updateUI];
 }
@@ -99,6 +112,7 @@
     self.upgradeApkCell.userInteractionEnabled = FsNeedsRepositoryUpdate();
     self.upgradeApkLabel.enabled = FsNeedsRepositoryUpdate();
     self.upgradeApkBadge.hidden = !FsNeedsRepositoryUpdate();
+    [self updateArm64JITSettings];
     [self.tableView reloadData];
 }
 
@@ -148,6 +162,25 @@
     if (!self.includeDebugPanel)
         sections--;
     return sections;
+}
+
+- (void)updateArm64JITSettings {
+    self.arm64JITSwitch.on = UserPreferences.shared.arm64JITEnabled;
+    self.arm64FastJITSwitch.on = UserPreferences.shared.arm64FastJITEnabled;
+    self.arm64FastJITSwitch.enabled = UserPreferences.shared.arm64JITEnabled;
+}
+
+- (void)arm64JITSettingChanged:(UISwitch *)sender {
+    if (sender.tag == 0) {
+        UserPreferences.shared.arm64JITEnabled = sender.on;
+        [AppDelegate applyJITPreferences];
+        if (sender.on)
+            [AppDelegate maybePresentJITEnableAlertOnViewController:self];
+    } else {
+        UserPreferences.shared.arm64FastJITEnabled = sender.on;
+        [AppDelegate applyJITPreferences];
+    }
+    [self updateArm64JITSettings];
 }
 
 - (IBAction)disableDimmingChanged:(id)sender {

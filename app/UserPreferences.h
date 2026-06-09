@@ -70,6 +70,8 @@ extern NSString *const kThemeBackgroundColor;
 @property NSArray<NSString *> *launchCommand;
 @property NSArray<NSString *> *bootCommand;
 @property NSString *hostnameOverride;
+@property BOOL arm64JITEnabled;
+@property BOOL arm64FastJITEnabled;
 // Same as above but returns nil if the user has never set the hostname
 @property (readonly) NSString *_hostnameOverride;
 

@@ -635,6 +635,103 @@ ISH_ARM64_BACKEND=arm64_jit
 If work later needs explicit gadget backend commands, add them here together
 with the exact selector env var or launch mechanism once confirmed from code.
 
+## iOS ARM64 JIT / TrollStore Notes
+
+The `iSH-ARM64` Xcode scheme already builds the ARM64 guest libraries through
+Meson with `-Dguest_arch=arm64` and links `jit/guest-arm64` into the app target.
+
+Current unsigned device build check:
+
+```bash
+timeout 180s xcodebuild -project iSH.xcodeproj -scheme 'iSH-ARM64' \
+  -configuration Release -destination 'generic/platform=iOS' build \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY='' EXPANDED_CODE_SIGN_IDENTITY=''
+```
+
+Current TrollStore/ad-hoc TIPA packaging command:
+
+```bash
+tools/package_arm64_trollstore_ipa.sh
+```
+
+The script builds the ARM64 app and `iSHFileProvider.appex` unsigned, stages
+`Payload/iSH ARM64.app`, embeds the file provider under `PlugIns/`, signs both
+executables with `ldid`, and writes:
+
+```bash
+build/iSH-ARM64-JIT-TrollStore.tipa
+```
+
+Useful overrides:
+
+- `BUILD_TIMEOUT=300s` for slower clean Xcode builds.
+- `OUTPUT_IPA=/path/to/name.tipa` to choose the output path.
+- `APP_BUNDLE_ID`, `APP_GROUP_ID`, and `APPEX_BUNDLE_ID` for local bundle ID
+  changes.
+
+The ARM64 JIT code allocator is iOS-aware:
+
+- non-iOS builds use the existing single mapping that is sealed with
+  `mprotect(PROT_READ | PROT_EXEC)`
+- iOS device builds use a single mapping like Folium/oaknut's iPhone path:
+  allocate `PROT_READ | PROT_EXEC`, switch to `PROT_READ | PROT_WRITE` while
+  emitting into an unpublished compile-only slab, then seal back to
+  `PROT_READ | PROT_EXEC`
+- `block->code_rw` and `block->code_rx` point into the same mapping on iOS, and
+  emitted code is flushed with `sys_icache_invalidate`
+- the older iOS `vm_remap` RW/RX alias design was rejected after device crashes
+  showed host execution entering a `shared memory` region whose current
+  protection was `rw-` despite max `rwx`
+- do not use `vm_region_64().protection & VM_PROT_EXECUTE` as the app-level JIT
+  availability check; it can reject valid debugger/TrollStore JIT states. Probe
+  by attempting the actual allocation/protection transition instead.
+- iOS JIT availability is gated on the process `CS_DEBUGGED` code-signing flag
+  before entering the backend. A successful `mprotect(PROT_READ | PROT_EXEC)`
+  is not enough; device crash logs showed mappings left as `r--/rw-` while
+  `mprotect` reported success.
+
+Do not use `pthread_jit_write_protect_np` on iOS; the SDK marks it unavailable
+there. Do not add `dynamic-codesigning` for TrollStore iOS 15+ A12+ builds;
+TrollStore documents that entitlement as banned on those devices.
+
+Current TrollStore enablement follows Amethyst's working model:
+
+- the ARM64 TrollStore app entitlement file includes `get-task-allow` and
+  `com.apple.private.security.no-sandbox`, plus the storage and
+  `platform-application` entitlements used by Amethyst's TrollStore package
+- at startup, if `CS_DEBUGGED` is absent and no-sandbox is available, iSH spawns
+  a child copy of itself with `--ish-arm64-jit-trace-me`; the child calls
+  `ptrace(PT_TRACE_ME)`, then the parent detaches and continues
+- if `CS_DEBUGGED` is still absent, the app keeps the ARM64 JIT backend disabled
+  and shows the existing JIT enablement alert
+
+App-side JIT enablement:
+
+- `iSH-ARM64` uses `app/AppARM64.xcconfig`, which selects
+  `app/iSH-ARM64-ad-hoc.entitlements`.
+- `app/iSH-ARM64-ad-hoc.entitlements` carries `get-task-allow` plus the ARM64
+  app group/font entitlements. The regular `app/iSH.entitlements` is unchanged.
+- In-app Settings adds an `ARM64 JIT` section with `Enable ARM64 JIT` and
+  `Enable Fast JIT` switches.
+- The app applies preferences through C runtime setters rather than host
+  environment variables:
+  - `cpu_set_arm64_jit_enabled()`
+  - `arm64_jit_set_fast_enabled()`
+- When JIT is enabled at startup, foreground, or switch-on, the app probes the
+  actual executable-memory path with `arm64_jit_probe_executable_memory()`.
+  If the probe fails, iSH keeps the preference enabled but temporarily forces
+  the threaded backend and presents an alert.
+- Recovery mode includes direct `Disable JIT` navigation action plus the same
+  normal ARM64 JIT/Fast JIT static-table section. Use recovery mode to clear a
+  persisted bad JIT setting before exiting recovery.
+- The alert offers:
+  - `Switch Off JIT`, which clears the preference and reapplies threaded mode.
+  - `Try TrollStore`, which opens
+    `apple-magnifier://enable-jit?bundle-id=<bundle id>`.
+- Final proof still requires a TrollStore-installed device run or a
+  debugger-enabled device run via StikDebug/AltJIT.
+
 ## Current Memory-Helper Direction
 
 The intended memory-helper architecture is:
