@@ -41,7 +41,8 @@ when a task needs to be split.
     hits because current `fast_trace runs` only counts C-dispatched traces, and
     make multi-guard function traces safe before relaxing the V1 gate.
 - Complete the guarded branch-heavy trace tier without workload-specific shapes.
-  - `ISH_ARM64_JIT_FAST=1` enables V1; verifier mode must keep it disabled.
+  - Fast JIT V1 is enabled by default for plain ARM64 JIT runs; `ISH_ARM64_JIT_FAST=0`
+    disables it, and verifier mode must keep it disabled.
   - Do not add sysbench-specific, fsqrt-specific, PLT-specific, or opcode
     whitelist logic. Trace construction should use normal A64 decode plus the
     existing slow-JIT emitters as the semantic source of truth.
@@ -53,7 +54,7 @@ when a task needs to be split.
     without calling C on fast hits.
 - Move from inline-at-source-block expansion to true runtime tiering.
   - Small PC-indexed standalone fast-trace cache and synthetic block emitter
-    exist and execute under `ISH_ARM64_JIT_FAST=1`.
+    exist and execute when Fast JIT is enabled.
   - Keep the no-replay invariant: compiling a trace from a hot edge must install
     it for future dispatches, not rewind and re-execute the edge that just ran
     through the slow JIT.
@@ -64,7 +65,7 @@ when a task needs to be split.
   - Fast traces must re-emit all inlined code with their own cached register
     map. Do not jump from fast trace completion into original slow-JIT source
     fragment host code.
-  - Current sysbench CPU result with `ISH_ARM64_JIT_FAST=1` and the prime-loop
+  - Current sysbench CPU result with Fast JIT enabled and the prime-loop
     function trace is about 4,100 events/s on this host, up from the previous
     ~1,900-2,000 events/s slow-function-tier result.
 - Expand generic trace construction.

@@ -17,7 +17,6 @@
 
 __thread struct arm64_jit_runtime *g_arm64_jit_runtime;
 extern __thread volatile sig_atomic_t in_jit;
-struct arm64_jit_tlb_profile g_arm64_jit_tlb_profile;
 struct arm64_jit_fast_func_asm_profile g_arm64_jit_fast_func_asm_profile;
 struct arm64_jit_fast_func_asm_top_entry g_arm64_jit_fast_func_asm_top[8];
 struct arm64_jit_edge_profile_entry
@@ -701,15 +700,6 @@ static int arm64_jit_dump_mode(void) {
     return dump_mode;
 }
 
-static int arm64_jit_tlb_profile_mode(void) {
-    static int profile_mode = -1;
-    if (profile_mode == -1) {
-        const char *env = getenv("ISH_ARM64_JIT_TLB_PROFILE");
-        profile_mode = (env != NULL && env[0] == '1') ? 1 : 0;
-    }
-    return profile_mode;
-}
-
 static int arm64_jit_fragment_page_profile_mode(void) {
     static int profile_mode = -1;
     if (profile_mode == -1) {
@@ -764,21 +754,6 @@ static addr_t arm64_jit_branch_miss_detail_page(void) {
     return page;
 }
 #endif
-
-void arm64_jit_dump_tlb_profile(void) {
-    if (!arm64_jit_tlb_profile_mode())
-        return;
-    uint64_t lookups = atomic_load(&g_arm64_jit_tlb_profile.bench_integer_lookups);
-    uint64_t hits = atomic_load(&g_arm64_jit_tlb_profile.bench_integer_hits);
-    uint64_t misses = atomic_load(&g_arm64_jit_tlb_profile.bench_integer_misses);
-    double hit_rate = lookups ? (100.0 * (double) hits / (double) lookups) : 0.0;
-    fprintf(stderr,
-            "[arm64-jit-tlb] bench_integer lookups=%llu hits=%llu misses=%llu hit_rate=%.4f%%\n",
-            (unsigned long long) lookups,
-            (unsigned long long) hits,
-            (unsigned long long) misses,
-            hit_rate);
-}
 
 static const char *arm64_jit_dump_filter(void) {
     static const char *filter;
@@ -869,28 +844,6 @@ static void arm64_jit_dump_block_json(const struct arm64_jit_block *block) {
     }
     fprintf(out, "],");
 
-    fprintf(out, "\"fast_traces\":[");
-    for (uint32_t i = 0; i < block->fast_trace_count; i++) {
-        const struct arm64_jit_fast_trace *trace = &block->fast_traces[i];
-        if (i)
-            fputc(',', out);
-        fprintf(out,
-                "{\"kind\":%u,\"code_off\":%u,\"inlined_insns\":%u,"
-                "\"entry_pc\":\"0x%llx\",\"exit_pc\":\"0x%llx\","
-                "\"thunk_pc\":\"0x%llx\",\"guard_addr\":\"0x%llx\","
-                "\"guard_value\":\"0x%llx\",\"invalidate_gen\":%u}",
-                trace->kind,
-                trace->code_offset,
-                trace->inlined_insns,
-                (unsigned long long) trace->entry_pc,
-                (unsigned long long) trace->exit_pc,
-                (unsigned long long) trace->thunk_pc,
-                (unsigned long long) trace->guard_addr,
-                (unsigned long long) trace->guard_value,
-                trace->invalidate_gen);
-    }
-    fprintf(out, "],");
-
     fprintf(out, "\"pc_map\":[");
     for (uint32_t i = 0; i < block->pc_map_count; i++) {
         if (i)
@@ -967,11 +920,6 @@ static struct arm64_jit_state *arm64_jit_state_new(struct mmu *mmu) {
     list_init(&state->code_slabs);
     lock_init(&state->lock);
     wrlock_init(&state->jetsam_lock);
-    static bool tlb_profile_atexit_installed;
-    if (!tlb_profile_atexit_installed && arm64_jit_tlb_profile_mode()) {
-        atexit(arm64_jit_dump_tlb_profile);
-        tlb_profile_atexit_installed = true;
-    }
     static bool helper_profile_atexit_installed;
     if (!helper_profile_atexit_installed && arm64_jit_helper_profile_mode()) {
         atexit(arm64_jit_dump_helper_profile);
@@ -1123,7 +1071,7 @@ int arm64_jit_fast_mode(void) {
     static int fast_mode = -1;
     if (fast_mode == -1) {
         const char *env = getenv("ISH_ARM64_JIT_FAST");
-        fast_mode = (env != NULL && env[0] == '1') ? 1 : 0;
+        fast_mode = (env == NULL || env[0] != '0') ? 1 : 0;
     }
     return fast_mode && !arm64_jit_verify_mode();
 }
@@ -1153,31 +1101,6 @@ int arm64_jit_fast_force_guard_fail_mode(void) {
         force_fail = (env != NULL && env[0] == '1') ? 1 : 0;
     }
     return force_fail;
-}
-
-bool arm64_jit_fast_skip_pc(addr_t pc) {
-    static int initialized;
-    static addr_t skip_pcs[32];
-    static size_t skip_count;
-    if (!initialized) {
-        const char *env = getenv("ISH_ARM64_JIT_FAST_SKIP_PC");
-        while (env != NULL && *env != '\0' && skip_count < sizeof(skip_pcs) / sizeof(skip_pcs[0])) {
-            char *end = NULL;
-            unsigned long long value = strtoull(env, &end, 0);
-            if (end == env)
-                break;
-            skip_pcs[skip_count++] = (addr_t) value;
-            env = end;
-            while (*env == ',' || *env == ':' || *env == ' ' || *env == '\t')
-                env++;
-        }
-        initialized = 1;
-    }
-    for (size_t i = 0; i < skip_count; i++) {
-        if (skip_pcs[i] == pc)
-            return true;
-    }
-    return false;
 }
 
 addr_t arm64_jit_verify_filter_pc(void) {
@@ -1440,23 +1363,6 @@ void arm64_jit_fast_func_profile_branch_reg_jitabi(struct arm64_jit_runtime *rt,
             arm64_jit_fast_func_profile_add_gain(rt, 1);
             break;
     }
-}
-
-bool arm64_jit_fast_edge_hot(addr_t source_pc, addr_t target_pc) {
-    if (!arm64_jit_fast_mode())
-        return false;
-    for (size_t i = 0; i < ARM64_JIT_EDGE_PROFILE_SIZE; i++) {
-        struct arm64_jit_edge_profile_entry *entry = &g_arm64_jit_edge_profile[i];
-        uint64_t count = atomic_load_explicit(&entry->count, memory_order_relaxed);
-        if (count < 64)
-            continue;
-        if ((addr_t) atomic_load_explicit(&entry->source_pc, memory_order_relaxed) != source_pc)
-            continue;
-        if ((addr_t) atomic_load_explicit(&entry->target_pc, memory_order_relaxed) != target_pc)
-            continue;
-        return true;
-    }
-    return false;
 }
 
 static void arm64_jit_profile_inc_c_helper(_Atomic uint64_t *family_counter) {
@@ -3260,49 +3166,6 @@ static void arm64_jit_nzcv_from_sub(struct cpu_state *cpu, uint64_t lhs, uint64_
 
 static uint64_t arm64_jit_mask_for_sf(bool sf) {
     return sf ? UINT64_MAX : 0xffffffffu;
-}
-
-static int arm64_jit_simd_elem_size_from_imm5(uint32_t imm5) {
-    if (imm5 & 0x1)
-        return 0; // B
-    if (imm5 & 0x2)
-        return 1; // H
-    if (imm5 & 0x4)
-        return 2; // S
-    if (imm5 & 0x8)
-        return 3; // D
-    return -1;
-}
-
-static uint64_t arm64_jit_simd_extract_elem(const union arm64_vreg *v, int elem_size, int index) {
-    switch (elem_size) {
-        case 0: return v->b[index];
-        case 1: return v->h[index];
-        case 2: return v->s[index];
-        case 3: return v->d[index];
-        default: return 0;
-    }
-}
-
-static void arm64_jit_simd_insert_elem(union arm64_vreg *v, int elem_size, int index, uint64_t value) {
-    switch (elem_size) {
-        case 0: v->b[index] = (uint8_t) value; break;
-        case 1: v->h[index] = (uint16_t) value; break;
-        case 2: v->s[index] = (uint32_t) value; break;
-        case 3: v->d[index] = value; break;
-        default: break;
-    }
-}
-
-static void arm64_jit_simd_clear(union arm64_vreg *v) {
-    v->q = 0;
-}
-
-static void arm64_jit_simd_dup_value(union arm64_vreg *v, uint64_t value, int elem_size, bool q) {
-    arm64_jit_simd_clear(v);
-    int count = q ? (16 >> elem_size) : (8 >> elem_size);
-    for (int i = 0; i < count; i++)
-        arm64_jit_simd_insert_elem(v, elem_size, i, value);
 }
 
 static void arm64_jit_write_nz_logical(struct cpu_state *cpu, uint64_t value, bool sf) {
@@ -6337,18 +6200,6 @@ static void arm64_jit_supersede_contained_blocks(struct arm64_jit_state *state,
         if (list_empty(bucket))
             continue;
         list_for_each_entry_safe(bucket, other, tmp, hash_chain) {
-            if (arm64_jit_trace_mode() &&
-                    block->start_pc == 0xeffdda70 &&
-                    (other->start_pc == 0xeffdda80 || other->start_pc == 0xeffddbe0)) {
-                fprintf(stderr,
-                        "[arm64-jit] supersede-check new=0x%llx..0x%llx old=0x%llx..0x%llx jetsam=%d valid=%d\n",
-                        (unsigned long long) block->start_pc,
-                        (unsigned long long) block->end_pc,
-                        (unsigned long long) other->start_pc,
-                        (unsigned long long) other->end_pc,
-                        other->is_jetsam,
-                        arm64_jit_block_has_valid_entry_for_pc(block, other->start_pc));
-            }
             if (other == block || other->is_jetsam)
                 continue;
             if (other->start_pc < block->start_pc || other->end_pc > block->end_pc)
@@ -7490,37 +7341,6 @@ static void arm64_jit_dump_cpu_diff(const struct cpu_state *expected, const stru
     }
 }
 
-static void arm64_jit_dump_block_window(const struct arm64_jit_block *block, addr_t guest_pc) {
-    if (block == NULL)
-        return;
-    int idx = -1;
-    for (uint32_t i = 0; i < block->insn_count; i++) {
-        if (block->insn_pcs[i] == guest_pc) {
-            idx = (int) i;
-            break;
-        }
-    }
-    if (idx < 0)
-        return;
-    int lo = idx - 3;
-    int hi = idx + 3;
-    if (lo < 0)
-        lo = 0;
-    if (hi >= (int) block->insn_count)
-        hi = (int) block->insn_count - 1;
-    fprintf(stderr,
-            "  block start=0x%llx end=0x%llx insns=%u window=%d..%d\n",
-            (unsigned long long) block->start_pc,
-            (unsigned long long) block->end_pc,
-            block->insn_count, lo, hi);
-    for (int i = lo; i <= hi; i++) {
-        fprintf(stderr, "  %c pc=0x%llx insn=0x%08x\n",
-                i == idx ? '>' : ' ',
-                (unsigned long long) block->insn_pcs[i],
-                block->insns[i]);
-    }
-}
-
 static void arm64_jit_dump_guest_window(struct tlb *tlb, addr_t guest_pc) {
     fprintf(stderr, "  guest window around 0x%llx\n", (unsigned long long) guest_pc);
     for (int i = -3; i <= 3; i++) {
@@ -7600,17 +7420,6 @@ static int arm64_jit_run_block_from_index(struct arm64_jit_block *block, uint32_
         rt.entry_target = (uint8_t *) block->code_rx + block->entry_thunks_offset +
                 ((uint32_t) entry_index << 2);
     }
-    if (arm64_jit_trace_mode() &&
-            ((block->start_pc == 0xeff862bc) || (block->start_pc == 0xeff840c8)) &&
-            entry_index != 0) {
-        fprintf(stderr, "[arm64-jit] run-from-index block=0x%llx idx=%u guest_pc=0x%llx entry=%p off=0x%x code=%p\n",
-                (unsigned long long) block->start_pc,
-                (unsigned) entry_index,
-                (unsigned long long) block->insn_pcs[entry_index],
-                entry,
-                block->insn_host_offsets[entry_index],
-                block->code_rx);
-    }
     if (arm64_jit_verify_mode()) {
         vs->trap_env_valid = true;
         if (sigsetjmp(vs->trap_env, 1) == 0) {
@@ -7686,10 +7495,6 @@ static int arm64_jit_run_block_from_index(struct arm64_jit_block *block, uint32_
         cpu->pc = rt.resume_pc;
     }
     return interrupt;
-}
-
-static int arm64_jit_run_block(struct arm64_jit_block *block, struct cpu_state *cpu, struct tlb *tlb) {
-    return arm64_jit_run_block_from_index(block, 0, cpu, tlb, NULL, NULL, NULL, NULL);
 }
 
 static void arm64_jit_dump_verify_step(uint64_t step, addr_t start_pc,

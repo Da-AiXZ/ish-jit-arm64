@@ -37,7 +37,6 @@
 #define ARM64_JIT_SCAN_HARD_LIMIT ARM64_JIT_MAX_INSNS
 #define ARM64_JIT_MAX_PC_MAP 2048
 #define ARM64_JIT_MAX_FIXUPS 2048
-#define ARM64_JIT_MAX_FAST_TRACES 16
 #define ARM64_JIT_MAX_GPR_USES 6
 #define ARM64_JIT_MAX_ALLOCATABLE_GPRS 18
 #define ARM64_JIT_TARGET_NATURAL_BOUNDARY_INSNS 128
@@ -128,18 +127,6 @@ struct arm64_jit_edge_profile_entry {
     uint64_t reserved1[3];
 };
 
-struct arm64_jit_fast_trace {
-    uint32_t kind;
-    uint32_t code_offset;
-    uint32_t inlined_insns;
-    addr_t entry_pc;
-    addr_t exit_pc;
-    addr_t thunk_pc;
-    addr_t guard_addr;
-    uint64_t guard_value;
-    unsigned invalidate_gen;
-};
-
 struct arm64_jit_block;
 struct arm64_jit_code_slab;
 
@@ -183,8 +170,6 @@ struct arm64_jit_block {
     struct arm64_jit_pc_map pc_map[ARM64_JIT_MAX_PC_MAP];
     uint32_t verify_site_count;
     struct arm64_jit_verify_site verify_sites[ARM64_JIT_MAX_VERIFY_SITES];
-    uint32_t fast_trace_count;
-    struct arm64_jit_fast_trace fast_traces[ARM64_JIT_MAX_FAST_TRACES];
     uint32_t fixup_count;
     struct arm64_jit_local_fixup fixups[ARM64_JIT_MAX_FIXUPS];
     uint32_t disabled_local_fixup_count;
@@ -359,12 +344,6 @@ struct arm64_jit_runtime {
     addr_t fast_func_request_pc;
 };
 
-struct arm64_jit_tlb_profile {
-    _Atomic uint64_t bench_integer_lookups;
-    _Atomic uint64_t bench_integer_hits;
-    _Atomic uint64_t bench_integer_misses;
-};
-
 struct arm64_jit_fast_func_asm_profile {
     uint64_t pushes;
     uint64_t rets;
@@ -379,7 +358,6 @@ struct arm64_jit_fast_func_asm_top_entry {
     uint32_t flags;
 };
 
-extern struct arm64_jit_tlb_profile g_arm64_jit_tlb_profile;
 extern struct arm64_jit_fast_func_asm_profile g_arm64_jit_fast_func_asm_profile;
 extern struct arm64_jit_fast_func_asm_top_entry g_arm64_jit_fast_func_asm_top[8];
 extern struct arm64_jit_edge_profile_entry
@@ -499,8 +477,6 @@ int arm64_jit_trace_mode(void);
 int arm64_jit_verify_mode(void);
 int arm64_jit_fast_mode(void);
 int arm64_jit_fast_force_guard_fail_mode(void);
-bool arm64_jit_fast_skip_pc(addr_t pc);
-bool arm64_jit_fast_edge_hot(addr_t source_pc, addr_t target_pc);
 void arm64_jit_profile_fast_trace_emit(uint32_t kind);
 addr_t arm64_jit_verify_filter_pc(void);
 uint64_t arm64_jit_verify_start_block(void);
@@ -508,7 +484,6 @@ int arm64_jit_branch_reg_fast_mode(void);
 int arm64_jit_handle_verify_sigtrap(void *ctx);
 void arm64_jit_set_saved_pc(addr_t pc);
 void arm64_jit_record_fault_pc(void *host_pc);
-void arm64_jit_dump_tlb_profile(void);
 void arm64_jit_dump_sample_profile(void);
 
 int c_load64(struct tlb *tlb, addr_t addr, uint64_t *out);

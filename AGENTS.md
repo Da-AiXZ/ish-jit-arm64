@@ -439,10 +439,11 @@ nested direct-call continuation semantics for `BL`.
 
 ## Fast JIT V1
 
-Fast JIT V1 is opt-in:
+Fast JIT V1 is enabled by default for plain ARM64 JIT runs. Disable it only when
+comparing against the slow JIT tier or narrowing a Fast JIT-specific bug:
 
 ```bash
-ISH_ARM64_JIT_FAST=1
+ISH_ARM64_JIT_FAST=0
 ```
 
 Verifier mode disables Fast JIT V1 automatically. In V1, verifier runs must
@@ -451,9 +452,9 @@ added.
 
 Current safety state:
 
-- `ISH_ARM64_JIT_FAST=1` enables edge profiling, hot-edge trace compilation,
+- Fast JIT mode enables edge profiling, hot-edge trace compilation,
   function-entry profiling/tiering, fast-trace cache lookup, and standalone
-  fast-trace execution.
+  fast-trace execution unless `ISH_ARM64_JIT_FAST=0` is set.
 - Verifier mode forcibly disables Fast JIT V1.
 - A newly compiled fast trace is installed for future natural dispatches only.
   Do not rewind `cpu->pc` to replay the already-executed hot source edge in the
@@ -469,7 +470,7 @@ Current V1 direction:
 - Fixed-target/control JITABI helpers receive `source_pc` in `x3`
   (`x0=rt`, `x1=target_pc`, `x2=kind`, `x3=source_pc`). Branch-register
   JITABI helpers already receive source PC and resolved target. When
-  `ISH_ARM64_JIT_FAST=1`, these helpers update a small edge-profile table
+  Fast JIT mode is enabled, these helpers update a small edge-profile table
   directly without calling C on fast hits.
 - The trace builder follows bounded fixed `BL`/`B` expansion and emits the
   expanded body through the normal slow-JIT instruction emitters. Do not add
@@ -512,15 +513,15 @@ Current V1 direction:
 - Helper-profile output now reports `fast_trace emits`, `dispatch_hits`,
   `runs`, and `guard_exits`. `dispatch_hits/runs` count C-dispatched traces,
   not helper-entered function traces.
-- BL/BLR/RET JITABI call-stack profiler hooks are live under
-  `ISH_ARM64_JIT_FAST=1`. The profiler is intentionally cleared before entering
+- BL/BLR/RET JITABI call-stack profiler hooks are live when Fast JIT is enabled.
+  The profiler is intentionally cleared before entering
   a fast trace so fast traces remain leaf tiering units and do not recursively
   request more fast traces from inside optimized code.
 
 Guard fallback test hook:
 
 ```bash
-timeout 25s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_FAST=1 \
+timeout 25s env ISH_ARM64_BACKEND=arm64_jit \
   ISH_ARM64_JIT_FAST_FORCE_GUARD_FAIL=1 \
   ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs \
   /usr/bin/sysbench cpu --cpu-max-prime=20000 run
@@ -530,7 +531,7 @@ Use `ISH_ARM64_JIT_TRACE=1` with a bounded sysbench run to confirm whether a
 trace was emitted:
 
 ```bash
-timeout 25s env ISH_ARM64_BACKEND=arm64_jit ISH_ARM64_JIT_FAST=1 \
+timeout 25s env ISH_ARM64_BACKEND=arm64_jit \
   ISH_ARM64_JIT_TRACE=1 \
   ./build-arm64-release/ish -f ./build/alpine-arm64-fakefs \
   /usr/bin/sysbench cpu --cpu-max-prime=20000 run \

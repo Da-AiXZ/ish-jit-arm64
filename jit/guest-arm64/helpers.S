@@ -169,11 +169,6 @@
 //   page_if_writable = 8
 //   data_minus_addr = 16
 //
-// arm64_jit_tlb_profile:
-//   bench_integer_lookups = 0
-//   bench_integer_hits = 8
-//   bench_integer_misses = 16
-.extern _g_arm64_jit_tlb_profile
 #ifdef ISH_ARM64_JIT_PERF_COUNTERS
 .extern _g_arm64_jit_branch_fast_profile
 
@@ -1351,36 +1346,12 @@ _arm64_jit_mem_lookup_page_live:
     add x16, x16, x1, lsl #5       // tlb entry*
 
     ldr x3, [sp, #104]             // access_kind
-    mov x5, #0                     // profile base or 0 when not tracking
-    ldr x6, [sp, #88]              // packed guest_pc/metadata
-    lsr x6, x6, #32                // guest_pc
-    mov x7, #0xdc94
-    movk x7, #0xeffd, lsl #16
-    cmp x6, x7
-    b.lo 90f
-    mov x7, #0xdd78
-    movk x7, #0xeffd, lsl #16
-    cmp x6, x7
-    b.hs 90f
-    adrp x5, _g_arm64_jit_tlb_profile@PAGE
-    add x5, x5, _g_arm64_jit_tlb_profile@PAGEOFF
-    ldr x7, [x5]
-    add x7, x7, #1
-    str x7, [x5]
-90:
     cbnz x3, 1f
     ldr x1, [x16, #0]              // entry.page
     cmp x1, x17
     b.ne 2f
     ldr x1, [x16, #16]             // data_minus_addr
     add x0, x1, x17                // host_page_base
-    cmp x5, #0
-    b.eq 91f
-    add x7, x5, #8
-    ldr x16, [x7]
-    add x16, x16, #1
-    str x16, [x7]
-91:
     ldr x16, [sp, #80]             // rt*
     mov x1, #0x11
     str x1, [x16, #72]             // rt->debug1 = read-hit
@@ -1393,20 +1364,12 @@ _arm64_jit_mem_lookup_page_live:
     str x17, [x0, #8]              // tlb->dirty_page
     ldr x1, [x16, #16]             // data_minus_addr
     add x0, x1, x17                // host_page_base
-    cmp x5, #0
-    b.eq 92f
-    add x7, x5, #8
-    ldr x16, [x7]
-    add x16, x16, #1
-    str x16, [x7]
-92:
     ldr x16, [sp, #80]             // rt*
     mov x1, #0x12
     str x1, [x16, #72]             // rt->debug1 = write-hit
     str x0, [x16, #80]             // rt->debug2 = host_page_base
     b 5f
 2:
-    str x5, [sp, #72]              // profile base across spill/C miss handler
     // Restore cached guest registers before invoking the fragment spill
     // snippet; helper scratch use may have clobbered x4-x15.
     ldp x4, x5, [sp, #32]
@@ -1426,15 +1389,7 @@ _arm64_jit_mem_lookup_page_live:
     ldr x2, [sp, #104]             // access_kind
     mov x0, x6                     // tlb*
     bl _tlb_handle_miss
-    ldr x5, [sp, #72]              // profile base
     cbz x0, 3f
-    cmp x5, #0
-    b.eq 93f
-    add x7, x5, #16
-    ldr x16, [x7]
-    add x16, x16, #1
-    str x16, [x7]
-93:
     str x0, [sp, #64]              // host_ptr from tlb_handle_miss
     ldr x17, [sp, #80]             // rt*
     ldr x16, [x17, #32]            // reload_state_fn

@@ -328,17 +328,6 @@ static void microbench_signal_dump(int sig) {
     (void)sig;
     dump_pc_hist();
     dump_pc_trace();
-#ifdef GUEST_ARM64
-    arm64_jit_dump_tlb_profile();
-    // Walk all tasks, dump guest x21 if available (microbench counter reg).
-    extern struct pid pids[];
-    for (int i = 1; i < 8; i++) {
-        struct task *t = pid_get_task(i);
-        if (t && t->cpu.x21 != 0) {
-            fprintf(stderr, "guest_pid=%d  x21=%llu\n", i, (unsigned long long)t->cpu.x21);
-        }
-    }
-#endif
     _exit(0);
 }
 
@@ -357,10 +346,6 @@ int main(int argc, char *const argv[]) {
     }
 #ifdef ISH_GADGET_PROFILE
     atexit(dump_gadget_profile);
-#endif
-#if defined(GUEST_ARM64)
-    if (getenv("ISH_ARM64_JIT_TLB_PROFILE"))
-        atexit(arm64_jit_dump_tlb_profile);
 #endif
     // Save host terminal settings so we can restore on exit
     if (isatty(STDIN_FILENO)) {
