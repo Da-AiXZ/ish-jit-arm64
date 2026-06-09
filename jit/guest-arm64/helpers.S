@@ -4520,7 +4520,7 @@ Lcontrol_fast_call_profile_done:
     and x2, x2, #3
     str x2, [sp, #80]
     ldr x16, [x0, #248]           // rt->fast_func_request_pc
-    cbnz x16, 8f
+    cbnz x16, Lcontrol_fast_trace_miss
 
     ldr x17, [sp, #48]            // packed kind/control_flags
     tbz x17, #8, Lcontrol_fast_function_trace_miss
@@ -4792,7 +4792,7 @@ Lbranch_fast_call_profile_done:
     ldp x0, x1, [sp, #32]
     ldp x2, x3, [sp, #48]
     ldr x16, [x0, #248]           // rt->fast_func_request_pc
-    cbnz x16, 2f
+    cbnz x16, Lbranch_fast_trace_miss
     ubfx x4, x2, #21, #4          // BR=0, BLR=1, RET=2
     cmp x4, #1
     b.ne Lbranch_fast_function_trace_miss

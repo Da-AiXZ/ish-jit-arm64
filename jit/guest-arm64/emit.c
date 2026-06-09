@@ -467,6 +467,9 @@ static void arm64_jit_emit_exit_epilogue_branch(struct arm64_jit_emitter *e);
 static void arm64_jit_patch_exit_epilogue_branches(struct arm64_jit_emitter *e,
         uint32_t epilogue_off);
 static void arm64_jit_emit_publish_resume_pc(struct arm64_jit_emitter *e, addr_t pc);
+static void arm64_jit_emit_internal_fallthrough(struct arm64_jit_emitter *e,
+        addr_t branch_pc, addr_t target_pc);
+static bool arm64_jit_branch_has_fallthrough(uint32_t insn);
 static enum arm64_jit_emit_result arm64_jit_emit_one(struct arm64_jit_emitter *e,
         const struct arm64_jit_insn_info *info, uint32_t insn, addr_t guest_pc);
 static void arm64_jit_reset_emit_metadata(struct arm64_jit_block *block);
@@ -1685,6 +1688,15 @@ static bool arm64_jit_emit_fast_trace_body(struct arm64_jit_emitter *e,
                         trace->function_entry ? 1u : 0u);
             }
             return false;
+        }
+        if (!trace->synthetic_set_lr[i] && !trace->synthetic_branch_guard[i] &&
+                (info->type != INSN_BRANCH || arm64_jit_branch_has_fallthrough(insn))) {
+            addr_t fallthrough_pc = pc + 4;
+            addr_t layout_next_pc = i + 1 < trace->block.insn_count ?
+                    trace->pcs[i + 1] : 0;
+            if (layout_next_pc != fallthrough_pc &&
+                    arm64_jit_fast_trace_contains_pc(trace, fallthrough_pc))
+                arm64_jit_emit_internal_fallthrough(e, pc, fallthrough_pc);
         }
     }
     return true;
