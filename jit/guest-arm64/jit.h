@@ -299,6 +299,7 @@ struct arm64_jit_state {
     size_t exec_page_hint_word_count;
     struct arm64_jit_page_bucket *page_hash;
     struct list jetsam;
+    struct arm64_jit_code_page_fragment *code_page_fragment_jetsam;
     struct list code_slabs;
     struct arm64_jit_code_slab *active_code_slab;
     lock_t lock;
@@ -468,6 +469,7 @@ int cpu_run_to_interrupt_arm64_jit(struct cpu_state *cpu, struct tlb *tlb);
 bool arm64_jit_alloc_code(struct arm64_jit_state *state, struct arm64_jit_block *block,
         size_t size, uint8_t **rw_out);
 bool arm64_jit_protect_code(struct arm64_jit_block *block);
+bool arm64_jit_flush_code_block(struct arm64_jit_block *block);
 void arm64_jit_free_code(struct arm64_jit_block *block);
 void arm64_jit_begin_code_batch(struct arm64_jit_state *state, size_t reserve_size);
 bool arm64_jit_finish_code_batch(struct arm64_jit_state *state);
@@ -477,6 +479,8 @@ bool arm64_jit_process_has_jit(void);
 
 int arm64_jit_trace_mode(void);
 int arm64_jit_verify_mode(void);
+void arm64_jit_set_verify_enabled(int enabled);
+void arm64_jit_set_verify_quiet_enabled(int enabled);
 void arm64_jit_set_fast_enabled(int enabled);
 int arm64_jit_get_fast_enabled(void);
 int arm64_jit_fast_mode(void);

@@ -28,6 +28,7 @@ NSString *const kPreferenceHideStatusBarKey = @"Status Bar";
 static NSString *const kPreferenceColorSchemeKey = @"Color Scheme";
 static NSString *const kPreferenceArm64JITEnabledKey = @"ARM64 JIT Enabled";
 static NSString *const kPreferenceArm64FastJITEnabledKey = @"ARM64 Fast JIT Enabled";
+static NSString *const kPreferenceArm64QuietVerifierEnabledKey = @"ARM64 Quiet Verifier Enabled";
 // This key has a different naming scheme because it's used in UI tests as a
 // CLI argument.
 NSString *const kHostnameOverrideKey = @"hostnameOverride";
@@ -170,6 +171,7 @@ bool (*remove_user_default)(const char *name);
             kPreferenceColorSchemeKey: @(ColorSchemeMatchSystem),
             kPreferenceArm64JITEnabledKey: @(NO),
             kPreferenceArm64FastJITEnabledKey: @(YES),
+            kPreferenceArm64QuietVerifierEnabledKey: @(NO),
             kPreferenceThemeKey: @"Default",
             kHostnameOverrideKey: UIDevice.currentDevice.name,
         }];
@@ -206,6 +208,7 @@ bool (*remove_user_default)(const char *name);
             @"color_scheme": kPreferenceColorSchemeKey,
             @"arm64_jit_enabled": kPreferenceArm64JITEnabledKey,
             @"arm64_fast_jit_enabled": kPreferenceArm64FastJITEnabledKey,
+            @"arm64_quiet_verifier_enabled": kPreferenceArm64QuietVerifierEnabledKey,
             @"theme": kPreferenceThemeKey,
             @"hostname_override": kHostnameOverrideKey,
         };
@@ -233,6 +236,7 @@ bool (*remove_user_default)(const char *name);
             kPreferenceColorSchemeKey: property(colorScheme),
             kPreferenceArm64JITEnabledKey: property(arm64JITEnabled),
             kPreferenceArm64FastJITEnabledKey: property(arm64FastJITEnabled),
+            kPreferenceArm64QuietVerifierEnabledKey: property(arm64QuietVerifierEnabled),
             // This one is a little bit special, so it needs extra handling.
             // The backing property for this is intentionally underscored.
             kPreferenceThemeKey: @"userTheme",
@@ -556,6 +560,19 @@ bool (*remove_user_default)(const char *name);
 }
 
 - (BOOL)validateArm64FastJITEnabled:(id *)value error:(NSError **)error {
+    return [*value isKindOfClass:NSNumber.class];
+}
+
+// MARK: arm64QuietVerifierEnabled
+- (BOOL)arm64QuietVerifierEnabled {
+    return [_defaults boolForKey:kPreferenceArm64QuietVerifierEnabledKey];
+}
+
+- (void)setArm64QuietVerifierEnabled:(BOOL)arm64QuietVerifierEnabled {
+    [_defaults setBool:arm64QuietVerifierEnabled forKey:kPreferenceArm64QuietVerifierEnabledKey];
+}
+
+- (BOOL)validateArm64QuietVerifierEnabled:(id *)value error:(NSError **)error {
     return [*value isKindOfClass:NSNumber.class];
 }
 

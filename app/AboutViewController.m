@@ -40,6 +40,7 @@
 
 @property (weak, nonatomic) IBOutlet UISwitch *arm64JITSwitch;
 @property (weak, nonatomic) IBOutlet UISwitch *arm64FastJITSwitch;
+@property (weak, nonatomic) IBOutlet UISwitch *arm64QuietVerifierSwitch;
 
 @end
 
@@ -64,7 +65,7 @@
                           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"],
                           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"]];
 
-    [UserPreferences.shared observe:@[@"capsLockMapping", @"fontSize", @"launchCommand", @"bootCommand", @"arm64JITEnabled", @"arm64FastJITEnabled"]
+    [UserPreferences.shared observe:@[@"capsLockMapping", @"fontSize", @"launchCommand", @"bootCommand", @"arm64JITEnabled", @"arm64FastJITEnabled", @"arm64QuietVerifierEnabled"]
                             options:0 owner:self usingBlock:^(typeof(self) self) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self _updateUI];
@@ -95,6 +96,7 @@
 - (void)disableArm64JITFromRecovery:(id)sender {
     UserPreferences.shared.arm64JITEnabled = NO;
     UserPreferences.shared.arm64FastJITEnabled = NO;
+    UserPreferences.shared.arm64QuietVerifierEnabled = NO;
     [AppDelegate applyJITPreferences];
     [self updateArm64JITSettings];
 }
@@ -167,17 +169,24 @@
 - (void)updateArm64JITSettings {
     self.arm64JITSwitch.on = UserPreferences.shared.arm64JITEnabled;
     self.arm64FastJITSwitch.on = UserPreferences.shared.arm64FastJITEnabled;
+    self.arm64QuietVerifierSwitch.on = UserPreferences.shared.arm64QuietVerifierEnabled;
     self.arm64FastJITSwitch.enabled = UserPreferences.shared.arm64JITEnabled;
+    self.arm64QuietVerifierSwitch.enabled = UserPreferences.shared.arm64JITEnabled;
 }
 
 - (void)arm64JITSettingChanged:(UISwitch *)sender {
     if (sender.tag == 0) {
         UserPreferences.shared.arm64JITEnabled = sender.on;
+        if (!sender.on)
+            UserPreferences.shared.arm64QuietVerifierEnabled = NO;
         [AppDelegate applyJITPreferences];
         if (sender.on)
             [AppDelegate maybePresentJITEnableAlertOnViewController:self];
-    } else {
+    } else if (sender.tag == 1) {
         UserPreferences.shared.arm64FastJITEnabled = sender.on;
+        [AppDelegate applyJITPreferences];
+    } else if (sender.tag == 2) {
+        UserPreferences.shared.arm64QuietVerifierEnabled = sender.on;
         [AppDelegate applyJITPreferences];
     }
     [self updateArm64JITSettings];

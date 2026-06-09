@@ -276,6 +276,8 @@ void SyncHostname(void) {
     BOOL wantsJIT = UserPreferences.shared.arm64JITEnabled;
     BOOL jitAvailable = wantsJIT ? arm64_jit_probe_executable_memory() : NO;
     cpu_set_arm64_jit_enabled(wantsJIT && jitAvailable);
+    arm64_jit_set_verify_enabled(UserPreferences.shared.arm64QuietVerifierEnabled);
+    arm64_jit_set_verify_quiet_enabled(UserPreferences.shared.arm64QuietVerifierEnabled);
     arm64_jit_set_fast_enabled(UserPreferences.shared.arm64FastJITEnabled);
 #endif
 }

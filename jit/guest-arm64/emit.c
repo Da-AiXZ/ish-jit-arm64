@@ -1812,7 +1812,7 @@ static bool arm64_jit_emit_fast_trace_block(struct arm64_jit_state *state,
         return false;
     }
     block->code_size = (uint32_t) e.size;
-    if (!arm64_jit_finish_code_batch(state)) {
+    if (!arm64_jit_finish_code_batch(state) || !arm64_jit_flush_code_block(block)) {
         arm64_jit_free_code(block);
         return false;
     }

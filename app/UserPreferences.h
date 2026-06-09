@@ -72,6 +72,7 @@ extern NSString *const kThemeBackgroundColor;
 @property NSString *hostnameOverride;
 @property BOOL arm64JITEnabled;
 @property BOOL arm64FastJITEnabled;
+@property BOOL arm64QuietVerifierEnabled;
 // Same as above but returns nil if the user has never set the hostname
 @property (readonly) NSString *_hostnameOverride;
 

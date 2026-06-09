@@ -350,6 +350,35 @@
                                             </constraints>
                                         </tableViewCellContentView>
                                     </tableViewCell>
+                                    <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" preservesSuperviewLayoutMargins="YES" selectionStyle="none" indentationWidth="10" id="jit-QV-CEL" userLabel="Enable Quiet Verifier">
+                                        <rect key="frame" x="0.0" y="707.5" width="320" height="43.5"/>
+                                        <autoresizingMask key="autoresizingMask"/>
+                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" preservesSuperviewLayoutMargins="YES" insetsLayoutMarginsFromSafeArea="NO" tableViewCell="jit-QV-CEL" id="jit-QV-CNT">
+                                            <rect key="frame" x="0.0" y="0.0" width="320" height="43.5"/>
+                                            <autoresizingMask key="autoresizingMask"/>
+                                            <subviews>
+                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" insetsLayoutMarginsFromSafeArea="NO" text="Enable Quiet Verifier" textAlignment="natural" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="jit-QV-LBL">
+                                                    <rect key="frame" x="16" y="11.5" width="157" height="21"/>
+                                                    <fontDescription key="fontDescription" type="system" pointSize="17"/>
+                                                    <nil key="textColor"/>
+                                                    <nil key="highlightedColor"/>
+                                                </label>
+                                                <switch opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="750" verticalHuggingPriority="750" tag="2" contentHorizontalAlignment="center" contentVerticalAlignment="center" translatesAutoresizingMaskIntoConstraints="NO" id="jit-QV-SWH">
+                                                    <rect key="frame" x="255" y="6.5" width="51" height="31"/>
+                                                    <connections>
+                                                        <action selector="arm64JITSettingChanged:" destination="yJz-O7-jlW" eventType="valueChanged" id="jit-QV-ACT"/>
+                                                    </connections>
+                                                </switch>
+                                            </subviews>
+                                            <constraints>
+                                                <constraint firstItem="jit-QV-LBL" firstAttribute="leading" secondItem="jit-QV-CNT" secondAttribute="leadingMargin" id="jit-QV-C01"/>
+                                                <constraint firstItem="jit-QV-LBL" firstAttribute="centerY" secondItem="jit-QV-CNT" secondAttribute="centerY" id="jit-QV-C02"/>
+                                                <constraint firstItem="jit-QV-SWH" firstAttribute="leading" relation="greaterThanOrEqual" secondItem="jit-QV-LBL" secondAttribute="trailing" constant="8" symbolic="YES" id="jit-QV-C03"/>
+                                                <constraint firstItem="jit-QV-SWH" firstAttribute="centerY" secondItem="jit-QV-CNT" secondAttribute="centerY" id="jit-QV-C04"/>
+                                                <constraint firstAttribute="trailingMargin" secondItem="jit-QV-SWH" secondAttribute="trailing" id="jit-QV-C05"/>
+                                            </constraints>
+                                        </tableViewCellContentView>
+                                    </tableViewCell>
                                 </cells>
                             </tableViewSection>
                             <tableViewSection headerTitle="Secret Advanced Debugging Options" footerTitle="Warning: Changing these can break everything! If that happens, there's a reset switch in the Settings app." id="d0T-DL-SuP">
@@ -456,8 +485,8 @@
                             </tableViewSection>
                         </sections>
                         <connections>
-                            <outlet property="dataSource" destination="yJz-O7-jlW" id="UX1-BB-BA1"/>
-                            <outlet property="delegate" destination="yJz-O7-jlW" id="sDs-T2-0bL"/>
+                        <outlet property="dataSource" destination="yJz-O7-jlW" id="UX1-BB-BA1"/>
+                        <outlet property="delegate" destination="yJz-O7-jlW" id="sDs-T2-0bL"/>
                         </connections>
                     </tableView>
                     <navigationItem key="navigationItem" title="Settings" id="bpe-0g-cWF">
@@ -471,6 +500,7 @@
                         <outlet property="bootCommandField" destination="bKw-tV-nX1" id="MVz-gk-QE7"/>
                         <outlet property="arm64FastJITSwitch" destination="jit-FT-SWH" id="jit-FT-OUT"/>
                         <outlet property="arm64JITSwitch" destination="jit-EN-SWH" id="jit-EN-OUT"/>
+                        <outlet property="arm64QuietVerifierSwitch" destination="jit-QV-SWH" id="jit-QV-OUT"/>
                         <outlet property="capsLockMappingCell" destination="31N-0g-RhF" id="UjF-21-3df"/>
                         <outlet property="disableDimmingSwitch" destination="cPj-sQ-qsh" id="Kjp-xA-A0Y"/>
                         <outlet property="exportContainerCell" destination="OIE-9g-Btx" id="qxo-l5-0Mq"/>

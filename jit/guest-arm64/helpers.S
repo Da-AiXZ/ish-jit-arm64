@@ -468,6 +468,7 @@
     ldr \scratch0x, [\out_entry]     // entry_pc
     cmp \scratch0x, \source
     b.ne \miss_label
+    dmb ishld
     ldr \scratch0x, [\out_entry, #8] // target_pc
     cmp \scratch0x, \target
     b.ne \miss_label
@@ -497,6 +498,7 @@
     ldr \scratch0x, [\out_entry]     // entry_pc
     cmp \scratch0x, \target
     b.ne \miss_label
+    dmb ishld
     ldr \scratch0x, [\out_entry, #8] // target_pc
     cmp \scratch0x, \target
     b.ne \miss_label
@@ -541,11 +543,13 @@
     lsr \scratch1x, \target, #12
     cmp \scratch0x, \scratch1x
     b.ne \miss_label
+    dmb ishld
     ldr \scratch0w, [\out_frag, #8]   // map->invalidate_gen
     ldr \scratch1w, [\rt, #120]       // rt->invalidate_gen
     cmp \scratch0w, \scratch1w
     b.ne \miss_label
     ldr \out_frag, [\out_frag, #16]   // map->fragments
+    dmb ishld
     mov \scratch1w, #32
 999:
     cbz \out_frag, \miss_label
@@ -582,6 +586,7 @@
     ldr \scratch0x, [\out_entry]      // entry->pc
     cmp \scratch0x, \target
     b.ne \miss_label
+    dmb ishld
     ldr \scratch0w, [\out_entry, #8]  // entry->invalidate_gen
     ldr \scratch1w, [\rt, #120]       // rt->invalidate_gen
     cmp \scratch0w, \scratch1w
@@ -602,15 +607,18 @@
     sub \scratch1x, \scratch1x, #1
     and \scratch1x, \scratch1x, \target, lsr #2
     add \scratch0x, \scratch0x, \scratch1x, lsl #6
-    str \target, [\scratch0x]
-    ldr \scratch1x, [\rt, #120]       // rt->invalidate_gen
-    str \scratch1x, [\scratch0x, #8]
+    str xzr, [\scratch0x]
+    dmb ish
     str \block, [\scratch0x, #16]
     str \jit_entry, [\scratch0x, #24]
     str \spill_fn, [\scratch0x, #32]
     str \reload_fn, [\scratch0x, #40]
     str \light_spill_fn, [\scratch0x, #48]
     str \target_host, [\scratch0x, #56]
+    ldr \scratch1x, [\rt, #120]       // rt->invalidate_gen
+    str \scratch1x, [\scratch0x, #8]
+    dmb ish
+    str \target, [\scratch0x]
 999:
 .endm
 
@@ -625,9 +633,8 @@
     sub \scratch1x, \scratch1x, #1
     and \scratch1x, \scratch1x, \scratch2x, lsr #2
     add \scratch0x, \scratch0x, \scratch1x, lsl #6
-    str \scratch2x, [\scratch0x]
-    ldr \scratch1x, [\rt, #120]       // rt->invalidate_gen
-    str \scratch1x, [\scratch0x, #8]
+    str xzr, [\scratch0x]
+    dmb ish
     ldr \scratch2x, [sp, #\block_off]
     str \scratch2x, [\scratch0x, #16]
     ldr \scratch2x, [sp, #\jit_entry_off]
@@ -640,6 +647,11 @@
     str \scratch2x, [\scratch0x, #48]
     ldr \scratch2x, [sp, #\target_host_off]
     str \scratch2x, [\scratch0x, #56]
+    ldr \scratch1x, [\rt, #120]       // rt->invalidate_gen
+    str \scratch1x, [\scratch0x, #8]
+    dmb ish
+    ldr \scratch2x, [sp, #\target_off]
+    str \scratch2x, [\scratch0x]
 999:
 .endm
 
@@ -4624,6 +4636,7 @@ Lcontrol_l2_way_loop:
     lsr x3, x1, #12
     cmp x17, x3
     b.ne Lcontrol_l2_next
+    dmb ishld
     ldr w17, [x4, #24]            // entry->invalidate_gen
     ldr w3, [x16, #120]           // rt->invalidate_gen
     cmp w17, w3
@@ -4933,6 +4946,7 @@ Lbranch_l2_way_loop:
     lsr x30, x3, #12
     cmp x17, x30
     b.ne Lbranch_l2_next
+    dmb ishld
     ldr w17, [x4, #24]            // entry->invalidate_gen
     ldr w30, [x16, #120]          // rt->invalidate_gen
     cmp w17, w30
