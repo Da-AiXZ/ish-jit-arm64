@@ -37,7 +37,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install ninja meson ldid
+          brew install ninja meson ldid coreutils
           echo "Xcode version:"
           xcodebuild -version
 
@@ -48,7 +48,6 @@ jobs:
             -scheme "$SCHEME" \
             -configuration "$CONFIGURATION" \
             -destination "generic/platform=iOS" \
-            -arch arm64 \
             -sdk iphoneos \
             build \
             SYMROOT="$PWD/build" \
@@ -56,14 +55,14 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY='' \
             EXPANDED_CODE_SIGN_IDENTITY='' \
-            SWIFT_OBJC_BRIDGING_HEADER='CodingPad/CodingPad-Bridging-Header.h' \
             | xcpretty --color || true
 
       - name: Package TrollStore IPA
         run: |
           chmod +x tools/package_arm64_trollstore_ipa.sh
 
-          # Use the existing TrollStore packaging script
+          # macOS uses gtimeout from coreutils instead of GNU timeout
+          TIMEOUT_BIN=gtimeout \
           OUTPUT_IPA="build/CodingPad-TrollStore.tipa" \
           APP_BUNDLE_ID="com.codingpad.app" \
           APP_GROUP_ID="group.com.codingpad.app" \
