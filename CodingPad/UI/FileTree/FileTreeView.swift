@@ -176,7 +176,7 @@ struct FileTreeView: View {
             }
             .padding(.vertical, 3)
             .padding(.horizontal, 8)
-            .background(selectedPath == node.path ? ColorColor.accentColor.opacity(0.1) : .clear)
+            .background(selectedPath == node.path ? Color.accentColor.opacity(0.1) : .clear)
         }
         .buttonStyle(.plain)
 
