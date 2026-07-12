@@ -1,0 +1,92 @@
+# .github/workflows/build-codingpad.yml
+# Builds CodingPad IPA (iSH-ARM64 + CodingPad Agent Core) for TrollStore
+name: Build CodingPad IPA
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+
+env:
+  SCHEME: iSH-ARM64
+  CONFIGURATION: ${{ github.event.inputs.configuration || 'Release' }}
+
+jobs:
+  build:
+    name: Build CodingPad IPA
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          brew install ninja meson ldid
+          echo "Xcode version:"
+          xcodebuild -version
+
+      - name: Build iSH-ARM64 (includes CodingPad)
+        run: |
+          xcodebuild \
+            -project iSH.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -destination "generic/platform=iOS" \
+            -arch arm64 \
+            -sdk iphoneos \
+            build \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            EXPANDED_CODE_SIGN_IDENTITY='' \
+            SWIFT_OBJC_BRIDGING_HEADER='CodingPad/CodingPad-Bridging-Header.h' \
+            | xcpretty --color || true
+
+      - name: Package TrollStore IPA
+        run: |
+          chmod +x tools/package_arm64_trollstore_ipa.sh
+
+          # Use the existing TrollStore packaging script
+          OUTPUT_IPA="build/CodingPad-TrollStore.tipa" \
+          APP_BUNDLE_ID="com.codingpad.app" \
+          APP_GROUP_ID="group.com.codingpad.app" \
+          ./tools/package_arm64_trollstore_ipa.sh
+
+          echo "=== IPA Info ==="
+          ls -lh build/CodingPad-TrollStore.tipa || ls -lh build/*.tipa || echo "IPA not found, checking build dir:"
+          find build -name "*.tipa" -o -name "*.ipa" 2>/dev/null
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodingPad-IPA
+          path: |
+            build/*.tipa
+            build/*.ipa
+          retention-days: 30
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/*.tipa
+            build/*.ipa
+          generate_release_notes: true
