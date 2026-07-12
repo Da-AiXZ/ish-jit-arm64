@@ -38,8 +38,13 @@ jobs:
       - name: Install dependencies
         run: |
           brew install ninja meson ldid coreutils
+          gem install xcodeproj
           echo "Xcode version:"
           xcodebuild -version
+
+      - name: Inject CodingPad Swift files into Xcode project
+        run: |
+          ruby scripts/inject_codingpad.rb
 
       - name: Build iSH-ARM64 (includes CodingPad)
         run: |
