@@ -94,8 +94,6 @@ app_group = project.main_group['app'] || project.main_group.new_group('app', 'ap
 ish_objc_files = [
   { path: 'app/ISHShellExecutor.m', type: 'sourcecode.c.objc', compile: true },
   { path: 'app/ISHShellExecutor.h', type: 'sourcecode.c.h', compile: false },
-  { path: 'app/LinuxInterop.c', type: 'sourcecode.c.c', compile: true },
-  { path: 'app/LinuxInterop.h', type: 'sourcecode.c.h', compile: false },
 ]
 
 ish_objc_files.each do |info|
