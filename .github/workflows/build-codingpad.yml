@@ -59,23 +59,31 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY='' \
-            EXPANDED_CODE_SIGN_IDENTITY='' \
-            | xcpretty --color || true
+            EXPANDED_CODE_SIGN_IDENTITY=''
 
       - name: Package TrollStore IPA
         run: |
-          chmod +x tools/package_arm64_trollstore_ipa.sh
+          # Package main app directly (skip FileProvider extension for now)
+          APP_DIR="build/$CONFIGURATION-iphoneos"
+          APP_NAME=$(ls "$APP_DIR" | grep '\.app$' | head -1)
 
-          # macOS uses gtimeout from coreutils instead of GNU timeout
-          TIMEOUT_BIN=gtimeout \
-          OUTPUT_IPA="build/CodingPad-TrollStore.tipa" \
-          APP_BUNDLE_ID="com.codingpad.app" \
-          APP_GROUP_ID="group.com.codingpad.app" \
-          ./tools/package_arm64_trollstore_ipa.sh
+          echo "App found: $APP_DIR/$APP_NAME"
+
+          mkdir -p build/Payload
+          cp -r "$APP_DIR/$APP_NAME" build/Payload/
+
+          # Sign with ldid for TrollStore
+          BINARY_NAME="${APP_NAME%.app}"
+          if [ -f "app/iSH-ARM64-ad-hoc.entitlements" ]; then
+            ldid -S"app/iSH-ARM64-ad-hoc.entitlements" "build/Payload/$APP_NAME/$BINARY_NAME"
+          fi
+
+          # Create .tipa
+          cd build
+          zip -qry CodingPad-TrollStore.tipa Payload/
 
           echo "=== IPA Info ==="
-          ls -lh build/CodingPad-TrollStore.tipa || ls -lh build/*.tipa || echo "IPA not found, checking build dir:"
-          find build -name "*.tipa" -o -name "*.ipa" 2>/dev/null
+          ls -lh CodingPad-TrollStore.tipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
