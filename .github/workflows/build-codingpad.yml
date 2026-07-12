@@ -37,7 +37,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install ninja meson ldid coreutils
+          brew install ninja meson ldid coreutils lld llvm
           gem install xcodeproj
           echo "Xcode version:"
           xcodebuild -version
