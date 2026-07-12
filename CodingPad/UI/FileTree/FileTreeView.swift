@@ -127,65 +127,62 @@ struct FileTreeView: View {
 
     // MARK: - Node Row
 
-    @ViewBuilder
-    private func fileNodeRow(_ node: FileNode, depth: Int) -> some View {
+    private func fileNodeRow(_ node: FileNode, depth: Int) -> AnyView {
         let isExpanded = expandedDirs.contains(node.path)
 
-        Button {
-            if node.isDirectory {
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    if isExpanded {
-                        expandedDirs.remove(node.path)
+        return AnyView(
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    if node.isDirectory {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            if isExpanded {
+                                expandedDirs.remove(node.path)
+                            } else {
+                                expandedDirs.insert(node.path)
+                            }
+                        }
                     } else {
-                        expandedDirs.insert(node.path)
+                        selectedPath = node.path
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Spacer()
+                            .frame(width: CGFloat(depth) * 16)
+
+                        if node.isDirectory {
+                            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 12)
+                        } else {
+                            Spacer().frame(width: 12)
+                        }
+
+                        Image(systemName: node.icon)
+                            .font(.caption2)
+                            .foregroundStyle(node.iconColor)
+                            .frame(width: 16)
+
+                        Text(node.name)
+                            .font(.caption)
+                            .foregroundStyle(selectedPath == node.path ? Color.accentColor : .primary)
+                            .lineLimit(1)
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 3)
+                    .padding(.horizontal, 8)
+                    .background(selectedPath == node.path ? Color.accentColor.opacity(0.1) : .clear)
+                }
+                .buttonStyle(.plain)
+
+                if node.isDirectory && isExpanded, let children = node.children {
+                    ForEach(children) { child in
+                        fileNodeRow(child, depth: depth + 1)
                     }
                 }
-            } else {
-                selectedPath = node.path
-                // TODO: Open file in editor
             }
-        } label: {
-            HStack(spacing: 4) {
-                // Indent
-                Spacer()
-                    .frame(width: CGFloat(depth) * 16)
-
-                // Disclosure indicator for directories
-                if node.isDirectory {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 12)
-                } else {
-                    Spacer().frame(width: 12)
-                }
-
-                // Icon
-                Image(systemName: node.icon)
-                    .font(.caption2)
-                    .foregroundStyle(node.iconColor)
-                    .frame(width: 16)
-
-                // Name
-                Text(node.name)
-                    .font(.caption)
-                    .foregroundStyle(selectedPath == node.path ? Color.accentColor : .primary)
-                    .lineLimit(1)
-
-                Spacer()
-            }
-            .padding(.vertical, 3)
-            .padding(.horizontal, 8)
-            .background(selectedPath == node.path ? Color.accentColor.opacity(0.1) : .clear)
-        }
-        .buttonStyle(.plain)
-
-        // Children (if expanded)
-        if node.isDirectory && isExpanded, let children = node.children {
-            ForEach(children) { child in
-                fileNodeRow(child, depth: depth + 1)
-            }
-        }
+        )
     }
 
     // MARK: - Tree Building
