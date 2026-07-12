@@ -88,6 +88,33 @@ if File.exist?(header_file)
   end
 end
 
+# Add ISHShellExecutor.m and .h to the target (they exist in app/ but aren't in pbxproj)
+app_group = project.main_group['app'] || project.main_group.new_group('app', 'app')
+
+ish_objc_files = [
+  { path: 'app/ISHShellExecutor.m', type: 'sourcecode.c.objc', compile: true },
+  { path: 'app/ISHShellExecutor.h', type: 'sourcecode.c.h', compile: false },
+  { path: 'app/LinuxInterop.c', type: 'sourcecode.c.c', compile: true },
+  { path: 'app/LinuxInterop.h', type: 'sourcecode.c.h', compile: false },
+]
+
+ish_objc_files.each do |info|
+  next unless File.exist?(info[:path])
+  filename = File.basename(info[:path])
+  existing = app_group.files.find { |f| f.display_name == filename }
+  unless existing
+    ref = app_group.new_reference(info[:path])
+    ref.last_known_file_type = info[:type]
+    ref.source_tree = 'SOURCE_ROOT'
+    if info[:compile]
+      target.source_build_phase.add_file_reference(ref)
+      puts "   add (objc): #{info[:path]}"
+    else
+      puts "   add (header): #{info[:path]}"
+    end
+  end
+end
+
 # Configure bridging header and Swift version in build settings
 target.build_configurations.each do |config|
   config.build_settings['SWIFT_OBJC_BRIDGING_HEADER'] = bridging_header
