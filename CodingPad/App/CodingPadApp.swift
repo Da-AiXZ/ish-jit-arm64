@@ -8,8 +8,10 @@ import SwiftUI
 import os
 
 // MARK: - App Entry Point
+// Note: @main is intentionally NOT used here.
+// In the iSH-based build, iSH's own main.m is the entry point.
+// CodingPad's SwiftUI UI is launched from AppDelegate.
 
-@main
 struct CodingPadApp: App {
     @State private var appState = AppState()
 
