@@ -13,14 +13,14 @@ import os
 // CodingPad's SwiftUI UI is launched from AppDelegate.
 
 struct CodingPadApp: App {
-    @State private var appState = AppState()
+    @StateObject private var appState = AppState()
 
     private let logger = Logger(subsystem: "com.codingpad", category: "App")
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environment(appState)
+                .environmentObject(appState)
                 .task {
                     await initializeServices()
                 }
@@ -82,7 +82,7 @@ struct CodingPadApp: App {
 /// Placeholder main content view.
 /// Will be replaced with the actual split-view layout.
 struct ContentView: View {
-    @Environment(AppState.self) private var appState
+    @EnvironmentObject private var appState: AppState
 
     var body: some View {
         NavigationStack {

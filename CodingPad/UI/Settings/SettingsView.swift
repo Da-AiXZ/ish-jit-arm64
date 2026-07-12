@@ -6,7 +6,7 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Environment(AppState.self) private var appState
+    @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
     @State private var apiKey = ""
@@ -160,5 +160,5 @@ struct SettingsView: View {
 
 #Preview {
     SettingsView()
-        .environment(AppState())
+        .environmentObject(AppState())
 }

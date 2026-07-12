@@ -106,13 +106,12 @@ typealias PermissionResolver = @Sendable (String, ToolInput, String) async -> Bo
 /// 7. Inject tool results as messages.
 /// 8. Loop back to step 3 until the model stops or maxTurns is reached.
 ///
-/// Uses `@Observable` for UI binding (iOS 17+).
-@Observable
-final class AgentLoop {
+/// Uses `ObservableObject` for UI binding (iOS 16+ compatible).
+final class AgentLoop: ObservableObject {
     // MARK: - Observable State
 
     /// Whether the loop is currently processing.
-    private(set) var isRunning: Bool = false
+    @Published private(set) var isRunning: Bool = false
 
     // MARK: - Dependencies (injected)
 

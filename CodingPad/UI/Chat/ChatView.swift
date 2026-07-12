@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct ChatView: View {
-    @Environment(AppState.self) private var appState
+    @EnvironmentObject private var appState: AppState
     @State private var inputText = ""
     @State private var isComposing = false
     @FocusState private var isInputFocused: Bool
@@ -601,5 +601,5 @@ struct InputBar: View {
 
 #Preview {
     ChatView()
-        .environment(AppState())
+        .environmentObject(AppState())
 }

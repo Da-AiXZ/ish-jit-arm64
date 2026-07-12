@@ -1,7 +1,7 @@
 // AppState.swift
 // CodingPad
 //
-// Global application state using @Observable (iOS 17+).
+// Global application state using ObservableObject (iOS 16+).
 // Single source of truth for session, messages, processing status,
 // and configuration. All UI binds to this object.
 
@@ -88,7 +88,7 @@ enum AppError: Error, LocalizedError, Identifiable {
 
 /// Global observable state for the CodingPad application.
 ///
-/// Uses `@Observable` (iOS 17+) for efficient SwiftUI integration.
+/// Uses `ObservableObject` for SwiftUI integration (iOS 16+ compatible).
 /// All state mutations happen on the main actor to ensure UI consistency.
 ///
 /// Key responsibilities:
@@ -97,75 +97,74 @@ enum AppError: Error, LocalizedError, Identifiable {
 /// - Manages todo items for multi-step task tracking
 /// - Stores the active project path and configuration
 /// - Surfaces errors for display in the UI
-@Observable
 @MainActor
-final class AppState {
+final class AppState: ObservableObject {
 
     // MARK: - Session State
 
     /// The current active conversation session.
-    var currentSession: Session?
+    @Published var currentSession: Session?
 
     /// All messages in the current conversation.
-    var messages: [Message] = []
+    @Published var messages: [Message] = []
 
     /// Whether the agent loop is currently processing.
-    var isProcessing: Bool = false
+    @Published var isProcessing: Bool = false
 
     /// Streaming text being assembled for the current response.
-    var streamingText: String = ""
+    @Published var streamingText: String = ""
 
     // MARK: - Todo Tracking
 
     /// Todo items for the current multi-step task.
-    var todos: [TodoItem] = []
+    @Published var todos: [TodoItem] = []
 
     // MARK: - Project State
 
     /// The file path of the currently active project.
-    var activeProjectPath: String?
+    @Published var activeProjectPath: String?
 
     /// List of known project paths.
-    var recentProjects: [String] = []
+    @Published var recentProjects: [String] = []
 
     // MARK: - Configuration
 
     /// Global agent configuration.
-    var config: AgentConfig = .default
+    @Published var config: AgentConfig = .default
 
     // MARK: - Error State
 
     /// The most recent error to display to the user.
-    var currentError: AppError?
+    @Published var currentError: AppError?
 
     /// Whether an error alert should be shown.
-    var showError: Bool = false
+    @Published var showError: Bool = false
 
     // MARK: - Permission State
 
     /// A pending permission request waiting for user confirmation.
     /// When non-nil, the UI shows a permission alert.
-    var pendingPermission: PermissionRequest?
+    @Published var pendingPermission: PermissionRequest?
 
     // MARK: - Active Tool Calls (for UI display)
 
     /// Tool calls currently being executed, keyed by tool call ID.
-    var activeToolCalls: [String: String] = [:]
+    @Published var activeToolCalls: [String: String] = [:]
 
     // MARK: - File Tree State
 
     /// When `true`, the file-tree view should refresh its data.
-    var needsFileTreeRefresh: Bool = false
+    @Published var needsFileTreeRefresh: Bool = false
 
     // MARK: - Agent Loop Reference
 
     /// The AgentLoop instance driving this session (held for ChatView to consume).
-    var agentLoop: AgentLoop?
+    @Published var agentLoop: AgentLoop?
 
     // MARK: - Usage Statistics
 
     /// Token usage snapshot for the current session.
-    var sessionUsage: SessionUsageSnapshot?
+    @Published var sessionUsage: SessionUsageSnapshot?
 
     // MARK: - Initialization
 

@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct MainLayout: View {
-    @Environment(AppState.self) private var appState
+    @EnvironmentObject private var appState: AppState
 
     @State private var fileTreeWidth: CGFloat = 220
     @State private var editorWidth: CGFloat = 350
@@ -138,5 +138,5 @@ struct MainLayout: View {
 
 #Preview {
     MainLayout()
-        .environment(AppState())
+        .environmentObject(AppState())
 }

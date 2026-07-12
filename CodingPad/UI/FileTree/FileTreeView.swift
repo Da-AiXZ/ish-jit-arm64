@@ -70,7 +70,7 @@ struct FileNode: Identifiable, Hashable {
 // MARK: - FileTreeView
 
 struct FileTreeView: View {
-    @Environment(AppState.self) private var appState
+    @EnvironmentObject private var appState: AppState
     @State private var rootNode: FileNode?
     @State private var selectedPath: String?
     @State private var expandedDirs: Set<String> = []
@@ -250,5 +250,5 @@ struct FileTreeView: View {
 #Preview {
     FileTreeView()
         .frame(width: 250)
-        .environment(AppState())
+        .environmentObject(AppState())
 }
