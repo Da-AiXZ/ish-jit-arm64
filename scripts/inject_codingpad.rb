@@ -11,75 +11,96 @@ require 'pathname'
 
 project_path = 'iSH.xcodeproj'
 target_name = 'iSH-ARM64'
-codingpad_dir = File.expand_path('CodingPad')
+codingpad_dir = 'CodingPad'
 bridging_header = 'CodingPad/CodingPad-Bridging-Header.h'
 
 abort "Xcode project not found at #{project_path}" unless File.exist?(project_path)
-abort "CodingPad directory not found at #{codingpad_dir}" unless File.directory?(codingpad_dir)
+abort "CodingPad directory not found" unless File.directory?(codingpad_dir)
 
 project = Xcodeproj::Project.open(project_path)
 
 target = project.targets.find { |t| t.name == target_name }
 abort "Target '#{target_name}' not found. Available: #{project.targets.map(&:name).join(', ')}" unless target
 
-puts "==> Target found: #{target.name}"
-puts "==> CodingPad directory: #{codingpad_dir}"
+puts "==> Target: #{target.name}"
 
-# Create or find a CodingPad group in the project
-codingpad_group = project.main_group.find_subpath('CodingPad', true)
-codingpad_group.set_source_tree('<group>')
-codingpad_group.set_path('CodingPad') unless codingpad_group.real_path
+# Find or create the CodingPad group at project root
+codingpad_group = project.main_group['CodingPad'] || project.main_group.new_group('CodingPad', 'CodingPad')
 
-# Recursively add all .swift files
-swift_files = Dir.glob(File.join(codingpad_dir, '**', '*.swift')).sort
-puts "==> Found #{swift_files.length} Swift files to add"
+# Helper: find or create nested groups from a relative directory path
+def find_or_create_group(parent, rel_dir)
+  parts = rel_dir.split('/')
+  current = parent
+  parts.each do |part|
+    existing = current[part]
+    if existing.is_a?(Xcodeproj::Project::Object::PBXGroup)
+      current = existing
+    else
+      current = current.new_group(part, part)
+    end
+  end
+  current
+end
+
+# Collect all .swift files and the bridging header
+swift_files = Dir.glob("#{codingpad_dir}/**/*.swift").sort
+header_file = bridging_header
+
+puts "==> Found #{swift_files.length} Swift files"
 
 added_count = 0
-swift_files.each do |abs_path|
-  rel_path = abs_path.sub("#{codingpad_dir}/", '')
 
-  # Skip if already referenced in the target
-  existing = target.source_build_phase.files_references.find do |f|
-    f.real_path && f.real_path.to_s.end_with?(rel_path)
-  end
+swift_files.each do |file_path|
+  # relative path within CodingPad/ e.g. "Core/LLM/SSEParser.swift"
+  rel = file_path.sub("#{codingpad_dir}/", '')
+  dir = File.dirname(rel)
+  filename = File.basename(rel)
+
+  # Find or create the appropriate group
+  group = dir == '.' ? codingpad_group : find_or_create_group(codingpad_group, dir)
+
+  # Check if file reference already exists in this group
+  existing = group.files.find { |f| f.display_name == filename }
   if existing
-    puts "   skip (already added): #{rel_path}"
+    puts "   skip: #{rel}"
     next
   end
 
-  # Create file reference in the appropriate subgroup
-  file_ref = codingpad_group.find_subpath(rel_path, true)
+  # Create file reference
+  file_ref = group.new_reference(file_path)
   file_ref.last_known_file_type = 'sourcecode.swift'
+  file_ref.source_tree = 'SOURCE_ROOT'
 
-  target.add_file_references([file_ref])
+  # Add to target's compile sources
+  target.source_build_phase.add_file_reference(file_ref)
   added_count += 1
-  puts "   added: #{rel_path}"
+  puts "   add: #{rel}"
 end
 
-# Add the bridging header file reference
-unless project.files.find { |f| f.path == bridging_header }
-  bh_ref = codingpad_group.new_reference('CodingPad-Bridging-Header.h')
-  bh_ref.last_known_file_type = 'sourcecode.c.h'
-  puts "==> Added bridging header reference"
+# Add bridging header reference (not to compile sources, just to project)
+if File.exist?(header_file)
+  bh_group = codingpad_group
+  unless bh_group.files.find { |f| f.display_name == File.basename(header_file) }
+    bh_ref = bh_group.new_reference(header_file)
+    bh_ref.last_known_file_type = 'sourcecode.c.h'
+    bh_ref.source_tree = 'SOURCE_ROOT'
+    puts "==> Added bridging header reference"
+  end
 end
 
-# Configure Swift bridging header in all build configurations
+# Configure bridging header and Swift version in build settings
 target.build_configurations.each do |config|
   config.build_settings['SWIFT_OBJC_BRIDGING_HEADER'] = bridging_header
-  # Allow Swift and Obj-C interop
-  config.build_settings['SWIFT_OBJC_INTERFACE_HEADER_NAME'] = 'CodingPad-Swift.h'
-  # Enable Swift in the target
-  config.build_settings['SWIFT_VERSION'] = '5.0' unless config.build_settings['SWIFT_VERSION']
+  config.build_settings['SWIFT_VERSION'] ||= '5.0'
+  config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+  # Ensure the target can find iSH's headers
+  paths = config.build_settings['HEADER_SEARCH_PATHS'] || ['$(inherited)']
+  paths = [paths] if paths.is_a?(String)
+  paths << '$(SRCROOT)/app' unless paths.include?('$(SRCROOT)/app')
+  config.build_settings['HEADER_SEARCH_PATHS'] = paths
 end
-puts "==> Configured bridging header: #{bridging_header}"
-
-# Also enable 'Always Search User Paths' to find our headers
-target.build_configurations.each do |config|
-  config.build_settings['USER_HEADER_SEARCH_PATHS'] ||= []
-  config.build_settings['USER_HEADER_SEARCH_PATHS'] << '$(SRCROOT)/CodingPad'
-end
+puts "==> Configured SWIFT_OBJC_BRIDGING_HEADER = #{bridging_header}"
 
 project.save
 puts ""
-puts "==> SUCCESS: Added #{added_count} Swift files to target '#{target_name}'"
-puts "==> Project saved."
+puts "==> SUCCESS: Added #{added_count} Swift files to '#{target_name}'"
