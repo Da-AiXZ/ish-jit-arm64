@@ -14,11 +14,18 @@ import UIKit
 /// Usage from Obj-C:
 ///   UIViewController *vc = [CodingPadUI createRootViewController];
 ///   self.window.rootViewController = vc;
+@MainActor
 @objc
 public final class CodingPadUI: NSObject {
 
     /// Shared AppState instance (lives for the app lifetime).
-    private static let appState = AppState()
+    private static var appStateStorage: AppState?
+    private static var appState: AppState {
+        if let existing = appStateStorage { return existing }
+        let new = AppState()
+        appStateStorage = new
+        return new
+    }
 
     /// Creates the root UIHostingController with the CodingPad MainLayout.
     ///
