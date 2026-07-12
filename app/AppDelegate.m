@@ -13,6 +13,11 @@
 #import "AboutViewController.h"
 #import "AppDelegate.h"
 #import "AppGroup.h"
+
+// CodingPad Swift bridge
+#if __has_include("iSH_ARM64-Swift.h")
+#import "iSH_ARM64-Swift.h"
+#endif
 #import "CurrentRoot.h"
 #import "ExceptionExfiltrator.h"
 #import "iOSFS.h"
@@ -185,6 +190,9 @@ static BOOL arm64JITAlertPresenting;
     if (err < 0)
         return err;
     task_start(current);
+
+    // Notify CodingPad that the iSH engine is ready for shell commands
+    [CodingPadUI notifyEngineReady];
 
 #else
     // On first launch, this will trigger the import of the default root. Make sure to do this before entering the kernel, because it needs to run something on the main thread, and that would deadlock.

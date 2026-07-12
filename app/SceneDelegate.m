@@ -4,10 +4,20 @@
 //
 //  Created by Theodore Dubois on 10/26/19.
 //
+//  Modified for CodingPad: root view is now SwiftUI MainLayout.
+//
 
 #import "SceneDelegate.h"
 #import "AppDelegate.h"
 #import "AboutViewController.h"
+
+// Auto-generated Swift header. Name matches PRODUCT_MODULE_NAME:
+// "iSH ARM64" → "iSH_ARM64-Swift.h"
+#if __has_include("iSH_ARM64-Swift.h")
+#import "iSH_ARM64-Swift.h"
+#elif __has_include("CodingPad-Swift.h")
+#import "CodingPad-Swift.h"
+#endif
 
 TerminalViewController *currentTerminalViewController = NULL;
 
@@ -30,42 +40,22 @@ static NSString *const TerminalUUID = @"TerminalUUID";
         return;
     }
 
-    TerminalViewController *vc = (TerminalViewController *) self.window.rootViewController;
-    vc.sceneSession = session;
-    if (session.stateRestorationActivity == nil) {
-        [vc startNewSession];
-    } else {
-        self.terminalUUID = session.stateRestorationActivity.userInfo[TerminalUUID];
-        [vc reconnectSessionFromTerminalUUID:
-         [[NSUUID alloc] initWithUUIDString:self.terminalUUID]];
-    }
+    // CodingPad: use SwiftUI MainLayout as the root view controller.
+    // This replaces iSH's TerminalViewController with our AI agent UI.
+    UIViewController *codingPadVC = [CodingPadUI createRootViewController];
+    self.window.rootViewController = codingPadVC;
 }
 
 - (NSUserActivity *)stateRestorationActivityForScene:(UIScene *)scene {
     NSUserActivity *activity = [[NSUserActivity alloc] initWithActivityType:@"app.ish.scene"];
-    TerminalViewController *vc = (TerminalViewController *) self.window.rootViewController;
-    if ([vc isKindOfClass:TerminalViewController.class]) {
-        self.terminalUUID = vc.sessionTerminalUUID.UUIDString;
-        if (self.terminalUUID != nil) {
-            [activity addUserInfoEntriesFromDictionary:@{TerminalUUID: self.terminalUUID}];
-        }
-    }
     return activity;
 }
 
 - (void)sceneDidBecomeActive:(UIScene *)scene {
-    TerminalViewController *terminalViewController = (TerminalViewController *) self.window.rootViewController;;
-    currentTerminalViewController = terminalViewController;
     [AppDelegate applyJITPreferences];
-    [AppDelegate maybePresentJITEnableAlertOnViewController:terminalViewController];
 }
 
 - (void)sceneWillResignActive:(UIScene *)scene {
-    TerminalViewController *terminalViewController = (TerminalViewController *) self.window.rootViewController;
-
-    if (currentTerminalViewController == terminalViewController) {
-        currentTerminalViewController = NULL;
-    }
 }
 
 @end
