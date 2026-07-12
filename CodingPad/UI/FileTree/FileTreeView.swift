@@ -169,14 +169,14 @@ struct FileTreeView: View {
                 // Name
                 Text(node.name)
                     .font(.caption)
-                    .foregroundStyle(selectedPath == node.path ? .accentColor : .primary)
+                    .foregroundStyle(selectedPath == node.path ? Color.accentColor : .primary)
                     .lineLimit(1)
 
                 Spacer()
             }
             .padding(.vertical, 3)
             .padding(.horizontal, 8)
-            .background(selectedPath == node.path ? Color.accentColor.opacity(0.1) : .clear)
+            .background(selectedPath == node.path ? ColorColor.accentColor.opacity(0.1) : .clear)
         }
         .buttonStyle(.plain)
 

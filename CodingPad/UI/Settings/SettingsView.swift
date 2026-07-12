@@ -142,7 +142,7 @@ struct SettingsView: View {
         // Save API key to Keychain
         let keychain = KeychainService()
         if !apiKey.isEmpty {
-            keychain.set(key: "anthropic_api_key", value: apiKey)
+            try? keychain.set(key: "anthropic_api_key", value: apiKey)
         }
 
         // Update config
