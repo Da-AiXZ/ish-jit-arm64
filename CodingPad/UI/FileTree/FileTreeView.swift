@@ -247,8 +247,3 @@ struct FileTreeView: View {
     ]
 }
 
-#Preview {
-    FileTreeView()
-        .frame(width: 250)
-        .environmentObject(AppState())
-}

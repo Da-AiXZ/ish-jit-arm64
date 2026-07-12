@@ -599,7 +599,3 @@ struct InputBar: View {
     }
 }
 
-#Preview {
-    ChatView()
-        .environmentObject(AppState())
-}

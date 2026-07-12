@@ -376,39 +376,3 @@ struct CodeBlockView: View {
 
 // MARK: - Preview
 
-#Preview("Markdown Rendering") {
-    ScrollView {
-        MarkdownView(text: """
-        # Heading 1
-
-        ## Heading 2
-
-        This is a paragraph with **bold**, *italic*, and `inline code`.
-
-        Here is a [link](https://example.com).
-
-        ```swift
-        struct Hello {
-            let name: String
-
-            func greet() -> String {
-                return "Hello, \\(name)!"
-            }
-        }
-        ```
-
-        - First item
-        - Second item
-        - Third item
-
-        1. Step one
-        2. Step two
-        3. Step three
-
-        ---
-
-        Another paragraph after the rule.
-        """)
-        .padding()
-    }
-}

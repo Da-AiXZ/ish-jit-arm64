@@ -105,7 +105,6 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    )
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {

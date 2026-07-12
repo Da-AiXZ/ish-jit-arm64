@@ -207,7 +207,3 @@ struct EditorView: View {
     }
 }
 
-#Preview {
-    EditorView()
-        .frame(width: 400, height: 600)
-}

@@ -136,7 +136,3 @@ struct MainLayout: View {
     }
 }
 
-#Preview {
-    MainLayout()
-        .environmentObject(AppState())
-}

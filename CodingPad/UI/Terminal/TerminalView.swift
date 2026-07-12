@@ -137,7 +137,3 @@ struct TerminalLine: Identifiable {
     let isError: Bool
 }
 
-#Preview {
-    TerminalView()
-        .frame(height: 200)
-}

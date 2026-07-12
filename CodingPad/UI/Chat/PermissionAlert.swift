@@ -187,20 +187,3 @@ extension View {
 
 // MARK: - Preview
 
-#Preview {
-    VStack {
-        Text("Background content")
-    }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .permissionAlert(
-        request: PermissionRequest(
-            id: "preview-1",
-            toolName: "bash",
-            input: ToolInput(parameters: ["command": .string("git push origin main")]),
-            reason: "Shell command requires confirmation"
-        ),
-        onAllow: {},
-        onAlwaysAllow: {},
-        onDeny: {}
-    )
-}
