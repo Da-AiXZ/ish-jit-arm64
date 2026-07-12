@@ -54,12 +54,12 @@ struct ChatView: View {
                     }
                     .padding(.vertical, 12)
                 }
-                .onChange(of: appState.messages.count) { _, _ in
+                .onChange(of: appState.messages.count) { _ in
                     withAnimation {
                         proxy.scrollTo(appState.messages.last?.id ?? "streaming", anchor: .bottom)
                     }
                 }
-                .onChange(of: appState.streamingText) { _, _ in
+                .onChange(of: appState.streamingText) { _ in
                     proxy.scrollTo("streaming", anchor: .bottom)
                 }
             }

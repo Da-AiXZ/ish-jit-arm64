@@ -50,7 +50,7 @@ struct TerminalView: View {
                     .padding(.vertical, 4)
                 }
                 .background(.black.opacity(0.85))
-                .onChange(of: outputLines.count) { _, _ in
+                .onChange(of: outputLines.count) { _ in
                     if let last = outputLines.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }

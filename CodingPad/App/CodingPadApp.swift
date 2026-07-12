@@ -93,10 +93,18 @@ struct ContentView: View {
                 }
 
                 if appState.messages.isEmpty {
-                    ContentUnavailableView(
-                        "CodingPad",
-                        systemImage: "chevron.left.forwardslash.chevron.right",
-                        description: Text("Start a conversation to begin coding.")
+                    VStack(spacing: 12) {
+                        Image(systemName: "chevron.left.forwardslash.chevron.right")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.tertiary)
+                        Text("CodingPad")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        Text("Start a conversation to begin coding.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     )
                 } else {
                     ScrollView {
@@ -121,7 +129,7 @@ struct ContentView: View {
             }
             .navigationTitle("CodingPad")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("New Session", systemImage: "plus") {
                         appState.startNewSession()
                     }

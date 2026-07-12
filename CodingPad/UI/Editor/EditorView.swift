@@ -116,7 +116,7 @@ struct EditorView: View {
                         .scrollDisabled(true)
                         .padding(.horizontal, 8)
                         .padding(.top, 4)
-                        .onChange(of: content) { _, _ in
+                        .onChange(of: content) { _ in
                             isModified = true
                             lineCount = content.components(separatedBy: "\n").count
                         }
