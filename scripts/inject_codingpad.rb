@@ -93,6 +93,8 @@ target.build_configurations.each do |config|
   config.build_settings['SWIFT_OBJC_BRIDGING_HEADER'] = bridging_header
   config.build_settings['SWIFT_VERSION'] ||= '5.0'
   config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+  # CodingPad requires iOS 17 for @Observable, SwiftUI features
+  config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
   # Ensure the target can find iSH's headers
   paths = config.build_settings['HEADER_SEARCH_PATHS'] || ['$(inherited)']
   paths = [paths] if paths.is_a?(String)
