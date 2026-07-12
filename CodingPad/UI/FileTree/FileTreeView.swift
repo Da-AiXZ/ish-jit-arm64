@@ -169,7 +169,7 @@ struct FileTreeView: View {
                 // Name
                 Text(node.name)
                     .font(.caption)
-                    .foregroundStyle(selectedPath == node.path ? .accent : .primary)
+                    .foregroundStyle(selectedPath == node.path ? .accentColor : .primary)
                     .lineLimit(1)
 
                 Spacer()

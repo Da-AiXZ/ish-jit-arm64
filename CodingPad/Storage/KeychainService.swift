@@ -67,7 +67,7 @@ final class KeychainService: Sendable {
 
     private let logger = Logger(subsystem: "com.codingpad", category: "KeychainService")
 
-    private init() {}
+    init() {}
 
     // MARK: - Public API
 

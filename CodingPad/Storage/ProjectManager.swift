@@ -117,17 +117,17 @@ actor ProjectManager {
 
     /// Returns all known projects, sorted by last opened date (most recent first).
     func allProjects() -> [ProjectInfo] {
-        projects.sorted { $0.lastOpenedAt > $1.lastOpenedAt }
+        self.projects.sorted { $0.lastOpenedAt > $1.lastOpenedAt }
     }
 
     /// Find a project by its ID.
     func project(id: String) -> ProjectInfo? {
-        projects.first { $0.id == id }
+        self.projects.first { $0.id == id }
     }
 
     /// Find a project by its path.
     func project(at path: String) -> ProjectInfo? {
-        projects.first { $0.path == path }
+        self.projects.first { $0.path == path }
     }
 
     /// Returns the currently active project, if any.
@@ -153,13 +153,13 @@ actor ProjectManager {
             throw ProjectManagerError.directoryNotFound(path)
         }
 
-        if projects.contains(where: { $0.path == path }) {
+        if self.projects.contains(where: { $0.path == path }) {
             throw ProjectManagerError.duplicateProject(path)
         }
 
         let name = URL(fileURLWithPath: path).lastPathComponent
         let project = ProjectInfo(name: name, path: path)
-        projects.append(project)
+        self.projects.append(project)
 
         try persist()
         logger.info("Added project: \(name) at \(path)")
@@ -172,15 +172,15 @@ actor ProjectManager {
     /// - Parameter id: The project ID to activate.
     /// - Throws: If the project is not found.
     func setActiveProject(id: String) throws {
-        guard let index = projects.firstIndex(where: { $0.id == id }) else {
+        guard let index = self.self.projects.firstIndex(where: { $0.id == id }) else {
             throw ProjectManagerError.projectNotFound(id)
         }
 
         activeProjectId = id
-        projects[index] = projects[index].withLastOpened()
+        self.projects[index] = self.projects[index].withLastOpened()
 
         try persist()
-        logger.info("Active project set to: \(projects[index].name)")
+        logger.info("Active project set to: \(self.projects[index].name)")
     }
 
     /// Switch the active project by path. Adds it if not already known.
@@ -204,7 +204,7 @@ actor ProjectManager {
     ///
     /// - Parameter id: The project ID to remove.
     func removeProject(id: String) throws {
-        projects = projects.filter { $0.id != id }
+        projects = self.projects.filter { $0.id != id }
 
         if activeProjectId == id {
             activeProjectId = nil
@@ -217,7 +217,7 @@ actor ProjectManager {
     /// Remove all projects whose directories no longer exist on disk.
     func pruneInvalidProjects() throws {
         let before = projects.count
-        projects = projects.filter(\.isValid)
+        projects = self.projects.filter(\.isValid)
         let removed = before - projects.count
 
         if removed > 0 {

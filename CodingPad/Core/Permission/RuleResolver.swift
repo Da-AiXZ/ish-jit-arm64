@@ -33,6 +33,7 @@ enum MatchSpecificity: Int, Comparable, Sendable {
     /// A pattern with wildcards (e.g., "file:**").
     case wildcard = 1
     /// An explicit pattern with no wildcards (e.g., "file:/Users/test.txt").
+    case explicit = 2
 
     static func < (lhs: MatchSpecificity, rhs: MatchSpecificity) -> Bool {
         lhs.rawValue < rhs.rawValue

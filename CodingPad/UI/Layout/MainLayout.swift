@@ -65,7 +65,7 @@ struct MainLayout: View {
             // App icon and name
             HStack(spacing: 6) {
                 Image(systemName: "wrench.and.screwdriver")
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(.accentColor)
                 Text("CodingPad")
                     .font(.headline)
             }

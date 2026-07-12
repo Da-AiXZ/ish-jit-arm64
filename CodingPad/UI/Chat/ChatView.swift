@@ -584,7 +584,7 @@ struct InputBar: View {
             Button(action: onSend) {
                 Image(systemName: isProcessing ? "stop.fill" : "arrow.up.circle.fill")
                     .font(.title2)
-                    .foregroundStyle(canSend ? .accent : .secondary)
+                    .foregroundStyle(canSend ? .accentColor : .secondary)
             }
             .disabled(!canSend && !isProcessing)
             .keyboardShortcut(.return, modifiers: .command)
