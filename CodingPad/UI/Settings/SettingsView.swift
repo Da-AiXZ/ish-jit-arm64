@@ -9,34 +9,33 @@ struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
-    @State private var apiKey = ""
+    @State private var deepseekKey = ""
     @State private var showApiKey = false
-    @State private var selectedModel = "claude-opus-4-8"
+    @State private var selectedModel = "deepseek-chat"
     @State private var permissionMode = PermissionMode.default
     @State private var maxTurns = 50
     @State private var language = "zh-CN"
     @State private var showSaved = false
 
     private let models = [
-        ("claude-opus-4-8", "Claude Opus 4.8 (Most capable)"),
-        ("claude-sonnet-5", "Claude Sonnet 5 (Best coding)"),
-        ("claude-haiku-4-5-20251001", "Claude Haiku 4.5 (Fastest)")
+        ("deepseek-chat", "DeepSeek Chat (V3, 推荐)"),
+        ("deepseek-reasoner", "DeepSeek Reasoner (R1, 深度推理)")
     ]
 
     var body: some View {
         NavigationStack {
             Form {
-                // API Key
-                Section("API Key") {
+                // DeepSeek API Key
+                Section("DeepSeek API Key") {
                     HStack {
                         if showApiKey {
-                            TextField("sk-ant-...", text: $apiKey)
+                            TextField("sk-...", text: $deepseekKey)
                                 .textFieldStyle(.plain)
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
                                 .font(.system(.body, design: .monospaced))
                         } else {
-                            SecureField("sk-ant-...", text: $apiKey)
+                            SecureField("sk-...", text: $deepseekKey)
                                 .textFieldStyle(.plain)
                                 .font(.system(.body, design: .monospaced))
                         }
@@ -48,12 +47,12 @@ struct SettingsView: View {
                         }
                     }
 
-                    Link("Get API Key →", destination: URL(string: "https://console.anthropic.com/")!)
+                    Link("获取 DeepSeek API Key →", destination: URL(string: "https://platform.deepseek.com/api_keys")!)
                         .font(.caption)
                 }
 
                 // Model Selection
-                Section("Model") {
+                Section("模型") {
                     Picker("Model", selection: $selectedModel) {
                         ForEach(models, id: \.0) { id, name in
                             Text(name).tag(id)
@@ -131,7 +130,7 @@ struct SettingsView: View {
 
     private func loadSettings() {
         let keychain = KeychainService()
-        apiKey = keychain.get(key: "anthropic_api_key") ?? ""
+        deepseekKey = keychain.get(key: "deepseek_api_key") ?? ""
         selectedModel = appState.config.modelId
         permissionMode = appState.config.permissionMode
         maxTurns = appState.config.maxTurns
@@ -139,10 +138,9 @@ struct SettingsView: View {
     }
 
     private func saveSettings() {
-        // Save API key to Keychain
         let keychain = KeychainService()
-        if !apiKey.isEmpty {
-            try? keychain.set(key: "anthropic_api_key", value: apiKey)
+        if !deepseekKey.isEmpty {
+            try? keychain.set(key: "deepseek_api_key", value: deepseekKey)
         }
 
         // Update config

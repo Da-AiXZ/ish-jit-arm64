@@ -350,7 +350,7 @@ struct AgentConfig: Codable, Sendable {
     var outputStyle: String
 
     static let `default` = AgentConfig(
-        modelId: "claude-opus-4-8",
+        modelId: "deepseek-chat",
         maxTokens: 16384,
         maxTurns: 50,
         permissionMode: .default,

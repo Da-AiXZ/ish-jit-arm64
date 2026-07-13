@@ -3,22 +3,14 @@
 //
 // Provides a UIHostingController wrapping CodingPad's SwiftUI interface.
 // Called from iSH's SceneDelegate (Obj-C) to set the root view controller.
-//
-// This is the bridge between iSH's UIKit lifecycle and CodingPad's SwiftUI UI.
 
 import SwiftUI
 import UIKit
 
-/// Obj-C visible class that creates the CodingPad SwiftUI root view controller.
-///
-/// Usage from Obj-C:
-///   UIViewController *vc = [CodingPadUI createRootViewController];
-///   self.window.rootViewController = vc;
 @MainActor
 @objc
 public final class CodingPadUI: NSObject {
 
-    /// Shared AppState instance (lives for the app lifetime).
     private static var appStateStorage: AppState?
     private static var appState: AppState {
         if let existing = appStateStorage { return existing }
@@ -27,9 +19,6 @@ public final class CodingPadUI: NSObject {
         return new
     }
 
-    /// Creates the root UIHostingController with the CodingPad MainLayout.
-    ///
-    /// - Returns: A UIHostingController ready to be set as window.rootViewController.
     @objc
     public static func createRootViewController() -> UIViewController {
         let mainView = MainLayout()
@@ -38,7 +27,6 @@ public final class CodingPadUI: NSObject {
         let hostingController = UIHostingController(rootView: mainView)
         hostingController.view.backgroundColor = UIColor.systemBackground
 
-        // Initialize services in the background
         Task {
             await initializeServices()
         }
@@ -46,8 +34,6 @@ public final class CodingPadUI: NSObject {
         return hostingController
     }
 
-    /// Notify CodingPad that iSH engine has finished booting.
-    /// Called from AppDelegate after the kernel is ready.
     @objc
     public static func notifyEngineReady() {
         Task {
@@ -64,10 +50,55 @@ public final class CodingPadUI: NSObject {
         // 2. Register default tools
         await registerTools()
 
-        // 3. Start a default session
-        await MainActor.run {
-            appState.startNewSession()
+        // 3. Create LLM provider (DeepSeek as default)
+        let provider = createLLMProvider()
+
+        // 4. Create and configure AgentLoop
+        let toolRouter = ToolRouter()
+        let registeredTools = await ToolRegistry.shared.allTools()
+        for tool in registeredTools {
+            await toolRouter.register(tool)
         }
+
+        let agentLoop = AgentLoop(
+            llmProvider: provider,
+            toolRouter: toolRouter,
+            permissionEngine: PermissionEngine()
+        )
+
+        // 5. Attach to AppState so ChatView can use it
+        appState.agentLoop = agentLoop
+
+        // 6. Start a default session
+        appState.startNewSession()
+    }
+
+    /// Create the LLM provider based on saved settings.
+    private static func createLLMProvider() -> any LLMProvider {
+        let keychain = KeychainService()
+
+        // Check for DeepSeek key first (user's primary)
+        if let deepseekKey = keychain.get(key: "deepseek_api_key"), !deepseekKey.isEmpty {
+            return OpenAICompatProvider(
+                preset: .deepseek,
+                modelId: "deepseek-chat",
+                apiKeyProvider: { deepseekKey }
+            )
+        }
+
+        // Check for Anthropic key
+        if let anthropicKey = keychain.get(key: "anthropic_api_key"), !anthropicKey.isEmpty {
+            return AnthropicProvider(apiKeyProvider: { anthropicKey })
+        }
+
+        // Default to DeepSeek with empty key (will prompt user in Settings)
+        return OpenAICompatProvider(
+            preset: .deepseek,
+            modelId: "deepseek-chat",
+            apiKeyProvider: {
+                KeychainService().get(key: "deepseek_api_key")
+            }
+        )
     }
 
     private static func registerTools() async {
